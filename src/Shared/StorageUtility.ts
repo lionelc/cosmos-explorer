@@ -21,15 +21,18 @@ export enum StorageKey {
   DatabaseAccountId,
   EncryptedKeyToken,
   IsCrossPartitionQueryEnabled,
+  QueryControlEnabled,
   MaxDegreeOfParellism,
   IsGraphAutoVizDisabled,
   TenantId,
-  MostRecentActivity,
+  MostRecentActivity, // deprecated
   SetPartitionKeyUndefined,
   GalleryCalloutDismissed,
   VisitedAccounts,
   PriorityLevel,
+  DocumentsTabPrefs,
   DefaultQueryResultsView,
+  AppState,
 }
 
 export const hasRUThresholdBeenConfigured = (): boolean => {
@@ -56,10 +59,10 @@ export const getRUThreshold = (): number => {
 
 export const getDefaultQueryResultsView = (): SplitterDirection => {
   const defaultQueryResultsViewRaw = LocalStorageUtility.getEntryString(StorageKey.DefaultQueryResultsView);
-  if (defaultQueryResultsViewRaw === SplitterDirection.Horizontal) {
-    return SplitterDirection.Horizontal;
+  if (defaultQueryResultsViewRaw === SplitterDirection.Vertical) {
+    return SplitterDirection.Vertical;
   }
-  return SplitterDirection.Vertical;
+  return SplitterDirection.Horizontal;
 };
 
 export const DefaultRUThreshold = 5000;

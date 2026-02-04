@@ -1,30 +1,31 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable no-console */
-import { FeedOptions, QueryOperationOptions } from "@azure/cosmos";
+import { FeedOptions } from "@azure/cosmos";
+import { AuthType } from "AuthType";
+import QueryError, { createMonacoErrorLocationResolver, createMonacoMarkersForQueryErrors } from "Common/QueryError";
 import { SplitterDirection } from "Common/Splitter";
 import { Platform, configContext } from "ConfigContext";
 import { useDialog } from "Explorer/Controls/Dialog";
+import { monaco } from "Explorer/LazyMonaco";
 import { QueryCopilotFeedbackModal } from "Explorer/QueryCopilot/Modal/QueryCopilotFeedbackModal";
 import { useCopilotStore } from "Explorer/QueryCopilot/QueryCopilotContext";
 import { QueryCopilotPromptbar } from "Explorer/QueryCopilot/QueryCopilotPromptbar";
+import { readCopilotToggleStatus, saveCopilotToggleStatus } from "Explorer/QueryCopilot/QueryCopilotUtilities";
 import { OnExecuteQueryClick, QueryDocumentsPerPage } from "Explorer/QueryCopilot/Shared/QueryCopilotClient";
 import { QueryCopilotSidebar } from "Explorer/QueryCopilot/V2/Sidebar/QueryCopilotSidebar";
 import { QueryResultSection } from "Explorer/Tabs/QueryTab/QueryResultSection";
+import { QueryTabStyles, useQueryTabStyles } from "Explorer/Tabs/QueryTab/Styles";
+import { CosmosFluentProvider } from "Explorer/Theme/ThemeUtil";
 import { useSelectedNode } from "Explorer/useSelectedNode";
 import { KeyboardAction } from "KeyboardShortcuts";
 import { QueryConstants } from "Shared/Constants";
-import {
-  LocalStorageUtility,
-  StorageKey,
-  getDefaultQueryResultsView,
-  getRUThreshold,
-  ruThresholdEnabled,
-} from "Shared/StorageUtility";
+import { LocalStorageUtility, StorageKey } from "Shared/StorageUtility";
 import { Action } from "Shared/Telemetry/TelemetryConstants";
+import { Allotment } from "allotment";
+import { useClientWriteEnabled } from "hooks/useClientWriteEnabled";
 import { QueryCopilotState, useQueryCopilot } from "hooks/useQueryCopilot";
 import { TabsState, useTabs } from "hooks/useTabs";
-import React, { Fragment } from "react";
-import SplitterLayout from "react-splitter-layout";
+import React, { Fragment, createRef } from "react";
 import "react-splitter-layout/lib/index.css";
 import { format } from "react-string-format";
 import QueryCommandIcon from "../../../../images/CopilotCommand.svg";
@@ -35,7 +36,6 @@ import ExecuteQueryIcon from "../../../../images/ExecuteQuery.svg";
 import CheckIcon from "../../../../images/check-1.svg";
 import SaveQueryIcon from "../../../../images/save-cosmos.svg";
 import { NormalizedEventKey } from "../../../Common/Constants";
-import { getErrorMessage } from "../../../Common/ErrorHandlingUtils";
 import * as HeadersUtility from "../../../Common/HeadersUtility";
 import { MinimalQueryIterator } from "../../../Common/IteratorUtilities";
 import { queryIterator } from "../../../Common/MongoProxyClient";
@@ -43,7 +43,6 @@ import { queryDocuments } from "../../../Common/dataAccess/queryDocuments";
 import { queryDocumentsPage } from "../../../Common/dataAccess/queryDocumentsPage";
 import * as DataModels from "../../../Contracts/DataModels";
 import * as ViewModels from "../../../Contracts/ViewModels";
-import * as StringUtility from "../../../Shared/StringUtility";
 import * as TelemetryProcessor from "../../../Shared/Telemetry/TelemetryProcessor";
 import { userContext } from "../../../UserContext";
 import * as QueryUtils from "../../../Utils/QueryUtils";
@@ -96,14 +95,22 @@ export interface IQueryTabComponentProps {
   copilotEnabled?: boolean;
   isSampleCopilotActive?: boolean;
   copilotStore?: Partial<QueryCopilotState>;
+  splitterDirection?: "horizontal" | "vertical";
+  queryViewSizePercent?: number;
+  onUpdatePersistedState: (state: {
+    queryText: string;
+    splitterDirection: "vertical" | "horizontal";
+    queryViewSizePercent: number;
+  }) => void;
 }
 
 interface IQueryTabStates {
   toggleState: ToggleState;
   sqlQueryEditorContent: string;
   selectedContent: string;
+  selection?: monaco.Selection;
+  executedSelection?: monaco.Selection; // We need to capture the selection that was used when executing, in case the user changes their section while the query is executing.
   queryResults: ViewModels.QueryResults;
-  error: string;
   isExecutionError: boolean;
   isExecuting: boolean;
   showCopilotSidebar: boolean;
@@ -112,10 +119,15 @@ interface IQueryTabStates {
   copilotActive: boolean;
   currentTabActive: boolean;
   queryResultsView: SplitterDirection;
+  errors?: QueryError[];
+  modelMarkers?: monaco.editor.IMarkerData[];
+  queryViewSizePercent: number;
 }
 
-export const QueryTabFunctionComponent = (props: IQueryTabComponentProps): any => {
+export const QueryTabCopilotComponent = (props: IQueryTabComponentProps): any => {
+  const styles = useQueryTabStyles();
   const copilotStore = useCopilotStore();
+
   const isSampleCopilotActive = useSelectedNode.getState().isQueryCopilotCollectionSelected();
   const queryTabProps = {
     ...props,
@@ -125,10 +137,22 @@ export const QueryTabFunctionComponent = (props: IQueryTabComponentProps): any =
     isSampleCopilotActive: isSampleCopilotActive,
     copilotStore: copilotStore,
   };
-  return <QueryTabComponent {...queryTabProps}></QueryTabComponent>;
+  return <QueryTabComponentImpl styles={styles} {...queryTabProps} />;
 };
 
-export default class QueryTabComponent extends React.Component<IQueryTabComponentProps, IQueryTabStates> {
+export const QueryTabComponent = (props: IQueryTabComponentProps): any => {
+  const styles = useQueryTabStyles();
+  return <QueryTabComponentImpl styles={styles} {...{ ...props }} />;
+};
+
+type QueryTabComponentImplProps = IQueryTabComponentProps & {
+  styles: QueryTabStyles;
+};
+
+// Inner (legacy) class component. We only use this component via one of the two functional components above (since we need to use the `useQueryTabStyles` hook).
+class QueryTabComponentImpl extends React.Component<QueryTabComponentImplProps, IQueryTabStates> {
+  private static readonly DEBOUNCE_DELAY_MS = 1000;
+
   public queryEditorId: string;
   public executeQueryButton: Button;
   public saveQueryButton: Button;
@@ -139,16 +163,19 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
   public isCopilotTabActive: boolean;
   private _iterator: MinimalQueryIterator;
   private queryAbortController: AbortController;
+  queryEditor: React.RefObject<EditorReact>;
+  private timeoutId: NodeJS.Timeout | undefined;
 
-  constructor(props: IQueryTabComponentProps) {
+  constructor(props: QueryTabComponentImplProps) {
     super(props);
+    this.queryEditor = createRef<EditorReact>();
 
     this.state = {
       toggleState: ToggleState.Result,
       sqlQueryEditorContent: props.isPreferredApiMongoDB ? "{}" : props.queryText || "SELECT * FROM c",
       selectedContent: "",
       queryResults: undefined,
-      error: "",
+      errors: [],
       isExecutionError: this.props.isExecutionError,
       isExecuting: false,
       showCopilotSidebar: useQueryCopilot.getState().showCopilotSidebar,
@@ -156,7 +183,9 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
       cancelQueryTimeoutID: undefined,
       copilotActive: this._queryCopilotActive(),
       currentTabActive: true,
-      queryResultsView: getDefaultQueryResultsView(),
+      queryResultsView:
+        props.splitterDirection === "vertical" ? SplitterDirection.Vertical : SplitterDirection.Horizontal,
+      queryViewSizePercent: props.queryViewSizePercent,
     };
     this.isCloseClicked = false;
     this.splitterId = this.props.tabId + "_splitter";
@@ -187,15 +216,26 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
     });
   }
 
+  /**
+   * Helper function to save the query text in the query tab state
+   * Since it reads and writes to the same state, it is debounced
+   */
+  private saveQueryTabStateDebounced = () => {
+    if (this.timeoutId) {
+      clearTimeout(this.timeoutId);
+    }
+    this.timeoutId = setTimeout(async () => {
+      this.props.onUpdatePersistedState({
+        queryText: this.state.sqlQueryEditorContent,
+        splitterDirection: this.state.queryResultsView,
+        queryViewSizePercent: this.state.queryViewSizePercent,
+      });
+    }, QueryTabComponentImpl.DEBOUNCE_DELAY_MS);
+  };
+
   private _queryCopilotActive(): boolean {
     if (this.props.copilotEnabled) {
-      const cachedCopilotToggleStatus: string = localStorage.getItem(
-        `${userContext.databaseAccount?.id}-queryCopilotToggleStatus`,
-      );
-      const copilotInitialActive: boolean = cachedCopilotToggleStatus
-        ? StringUtility.toBoolean(cachedCopilotToggleStatus)
-        : true;
-      return copilotInitialActive;
+      return readCopilotToggleStatus(userContext.databaseAccount);
     }
     return false;
   }
@@ -221,9 +261,10 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
 
   public onExecuteQueryClick = async (): Promise<void> => {
     this._iterator = undefined;
+
     setTimeout(async () => {
       await this._executeQueryDocumentsPage(0);
-    }, 100);
+    }, 100); // TODO: Revert this
     if (this.state.copilotActive) {
       const query = this.state.sqlQueryEditorContent.split("\r\n")?.pop();
       const isqueryEdited = this.props.copilotStore.generatedQuery && this.props.copilotStore.generatedQuery !== query;
@@ -302,23 +343,22 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
   }
 
   private async _executeQueryDocumentsPage(firstItemIndex: number): Promise<void> {
+    // Capture the query content and the selection being executed (if any).
+    const query = this.state.selectedContent || this.state.sqlQueryEditorContent;
+    const selection = this.state.selection;
+    this.setState({
+      // Track the executed selection so that we can evaluate error positions relative to it, even if the user changes their current selection.
+      executedSelection: selection,
+    });
+
     this.queryAbortController = new AbortController();
     if (this._iterator === undefined) {
       this._iterator = this.props.isPreferredApiMongoDB
-        ? queryIterator(
-            this.props.collection.databaseId,
-            this.props.viewModelcollection,
-            this.state.selectedContent || this.state.sqlQueryEditorContent,
-          )
-        : queryDocuments(
-            this.props.collection.databaseId,
-            this.props.collection.id(),
-            this.state.selectedContent || this.state.sqlQueryEditorContent,
-            {
-              enableCrossPartitionQuery: HeadersUtility.shouldEnableCrossPartitionKey(),
-              abortSignal: this.queryAbortController.signal,
-            } as unknown as FeedOptions,
-          );
+        ? queryIterator(this.props.collection.databaseId, this.props.viewModelcollection, query)
+        : queryDocuments(this.props.collection.databaseId, this.props.collection.id(), query, {
+            enableCrossPartitionQuery: HeadersUtility.shouldEnableCrossPartitionKey(),
+            abortSignal: this.queryAbortController.signal,
+          } as unknown as FeedOptions);
     }
 
     await this._queryDocumentsPage(firstItemIndex);
@@ -329,21 +369,9 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
     this.setState({
       isExecutionError: false,
     });
-
-    let queryOperationOptions: QueryOperationOptions;
-    if (userContext.apiType === "SQL" && ruThresholdEnabled()) {
-      const ruThreshold: number = getRUThreshold();
-      queryOperationOptions = {
-        ruCapPerOperation: ruThreshold,
-      } as QueryOperationOptions;
-    }
+    this.props.tabsBaseInstance.isExecutionWarning(false);
     const queryDocuments = async (firstItemIndex: number) =>
-      await queryDocumentsPage(
-        this.props.collection && this.props.collection.id(),
-        this._iterator,
-        firstItemIndex,
-        queryOperationOptions,
-      );
+      await queryDocumentsPage(this.props.collection && this.props.collection.id(), this._iterator, firstItemIndex);
     this.props.tabsBaseInstance.isExecuting(true);
     this.setState({
       isExecuting: true,
@@ -383,18 +411,25 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
         firstItemIndex,
         queryDocuments,
       );
-      this.setState({ queryResults, error: "" });
+      if (queryResults.ruThresholdExceeded) {
+        this.props.tabsBaseInstance.isExecutionWarning(true);
+      }
+      this.setState({ queryResults, errors: [] });
     } catch (error) {
       this.props.tabsBaseInstance.isExecutionError(true);
       this.setState({
         isExecutionError: true,
       });
-      const errorMessage = getErrorMessage(error);
-      this.setState({
-        error: errorMessage,
-      });
 
-      document.getElementById("error-display").focus();
+      // Try to parse this as a query error
+      const queryErrors = QueryError.tryParse(
+        error,
+        createMonacoErrorLocationResolver(this.queryEditor.current.editor, this.state.executedSelection),
+      );
+      this.setState({
+        errors: queryErrors,
+        modelMarkers: createMonacoMarkersForQueryErrors(queryErrors),
+      });
     } finally {
       this.props.tabsBaseInstance.isExecuting(false);
       this.setState({
@@ -441,7 +476,9 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
           commandButtonLabel: label,
           ariaLabel: label,
           hasPopup: false,
-          disabled: !this.saveQueryButton.enabled,
+          disabled:
+            !this.saveQueryButton.enabled ||
+            (!useClientWriteEnabled.getState().clientWriteEnabled && userContext.authType === AuthType.AAD),
         });
       }
 
@@ -549,7 +586,7 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
     };
   }
   private _setViewLayout(direction: SplitterDirection): void {
-    this.setState({ queryResultsView: direction });
+    this.setState({ queryResultsView: direction }, () => this.saveQueryTabStateDebounced());
 
     // We'll need to refresh the context buttons to update the selected state of the view buttons
     setTimeout(() => {
@@ -560,7 +597,7 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
   private _toggleCopilot = (active: boolean) => {
     this.setState({ copilotActive: active });
     useQueryCopilot.getState().setCopilotEnabledforExecution(active);
-    localStorage.setItem(`${userContext.databaseAccount?.id}-queryCopilotToggleStatus`, active.toString());
+    saveCopilotToggleStatus(userContext.databaseAccount, active);
 
     TelemetryProcessor.traceSuccess(active ? Action.ActivateQueryCopilot : Action.DeactivateQueryCopilot, {
       databaseName: this.props.collection.databaseId,
@@ -581,10 +618,16 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
     if (this.state.copilotActive) {
       this.props.copilotStore?.setQuery(newContent);
     }
-    this.setState({
-      sqlQueryEditorContent: newContent,
-      queryCopilotGeneratedQuery: "",
-    });
+    this.setState(
+      {
+        sqlQueryEditorContent: newContent,
+        queryCopilotGeneratedQuery: "",
+
+        // Clear the markers when the user edits the document.
+        modelMarkers: [],
+      },
+      () => this.saveQueryTabStateDebounced(),
+    );
     if (this.isPreferredApiMongoDB) {
       if (newContent.length > 0) {
         this.executeQueryButton = {
@@ -604,14 +647,16 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
     useCommandBar.getState().setContextButtons(this.getTabsButtons());
   }
 
-  public onSelectedContent(selectedContent: string): void {
+  public onSelectedContent(selectedContent: string, selection: monaco.Selection): void {
     if (selectedContent.trim().length > 0) {
       this.setState({
         selectedContent,
+        selection,
       });
     } else {
       this.setState({
         selectedContent: "",
+        selection: undefined,
       });
     }
 
@@ -645,6 +690,7 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
   }
 
   private unsubscribeCopilotSidebar: () => void;
+  private unsubscribeClientWriteEnabled: () => void;
 
   componentDidMount(): void {
     useTabs.subscribe((state: TabsState) => {
@@ -661,16 +707,24 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
 
     useCommandBar.getState().setContextButtons(this.getTabsButtons());
     document.addEventListener("keydown", this.handleCopilotKeyDown);
+
+    this.unsubscribeClientWriteEnabled = useClientWriteEnabled.subscribe(() => {
+      useCommandBar.getState().setContextButtons(this.getTabsButtons());
+    });
   }
 
   componentWillUnmount(): void {
     document.removeEventListener("keydown", this.handleCopilotKeyDown);
+    if (this.unsubscribeClientWriteEnabled) {
+      this.unsubscribeClientWriteEnabled();
+    }
   }
 
   private getEditorAndQueryResult(): JSX.Element {
+    const vertical = this.state.queryResultsView === SplitterDirection.Horizontal;
     return (
       <Fragment>
-        <div className="tab-pane" id={this.props.tabId} role="tabpanel">
+        <CosmosFluentProvider id={this.props.tabId} className={this.props.styles.queryTab} role="tabpanel">
           {this.props.copilotEnabled && this.state.currentTabActive && this.state.copilotActive && (
             <QueryCopilotPromptbar
               explorer={this.props.collection.container}
@@ -679,34 +733,45 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
               containerId={this.props.collection.id()}
             ></QueryCopilotPromptbar>
           )}
-          <div className="tabPaneContentContainer">
-            <SplitterLayout
-              vertical={this.state.queryResultsView === SplitterDirection.Vertical}
-              primaryIndex={0}
-              primaryMinSize={100}
-              secondaryMinSize={200}
+          {/* Set 'key' to the value of vertical to force re-rendering when vertical changes, to work around https://github.com/johnwalley/allotment/issues/457 */}
+          <Allotment
+            key={vertical.toString()}
+            vertical={vertical}
+            onDragEnd={(sizes: number[]) => {
+              const queryViewSizePercent = (100 * sizes[0]) / (sizes[0] + sizes[1]);
+              this.setState({ queryViewSizePercent }, () => this.saveQueryTabStateDebounced());
+            }}
+          >
+            <Allotment.Pane
+              data-test="QueryTab/EditorPane"
+              preferredSize={
+                this.state.queryViewSizePercent !== undefined ? `${this.state.queryViewSizePercent}%` : undefined
+              }
             >
-              <Fragment>
-                <div className="queryEditor" style={{ height: "100%" }}>
-                  <EditorReact
-                    language={"sql"}
-                    content={this.getEditorContent()}
-                    isReadOnly={false}
-                    wordWrap={"on"}
-                    ariaLabel={"Editing Query"}
-                    lineNumbers={"on"}
-                    onContentChanged={(newContent: string) => this.onChangeContent(newContent)}
-                    onContentSelected={(selectedContent: string) => this.onSelectedContent(selectedContent)}
-                  />
-                </div>
-              </Fragment>
+              <EditorReact
+                ref={this.queryEditor}
+                className={this.props.styles.queryEditor}
+                language={"sql"}
+                content={this.getEditorContent()}
+                modelMarkers={this.state.modelMarkers}
+                isReadOnly={false}
+                wordWrap={"on"}
+                ariaLabel={"Editing Query"}
+                lineNumbers={"on"}
+                onContentChanged={(newContent: string) => this.onChangeContent(newContent)}
+                onContentSelected={(selectedContent: string, selection: monaco.Selection) =>
+                  this.onSelectedContent(selectedContent, selection)
+                }
+              />
+            </Allotment.Pane>
+            <Allotment.Pane>
               {this.props.isSampleCopilotActive ? (
                 <QueryResultSection
                   isMongoDB={this.props.isPreferredApiMongoDB}
                   queryEditorContent={this.state.sqlQueryEditorContent}
-                  error={this.props.copilotStore?.errorMessage}
-                  queryResults={this.props.copilotStore?.queryResults}
+                  errors={this.props.copilotStore?.errors}
                   isExecuting={this.props.copilotStore?.isExecuting}
+                  queryResults={this.props.copilotStore?.queryResults}
                   executeQueryDocumentsPage={(firstItemIndex: number) =>
                     QueryDocumentsPerPage(
                       firstItemIndex,
@@ -719,17 +784,17 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
                 <QueryResultSection
                   isMongoDB={this.props.isPreferredApiMongoDB}
                   queryEditorContent={this.state.sqlQueryEditorContent}
-                  error={this.state.error}
-                  queryResults={this.state.queryResults}
+                  errors={this.state.errors}
                   isExecuting={this.state.isExecuting}
+                  queryResults={this.state.queryResults}
                   executeQueryDocumentsPage={(firstItemIndex: number) =>
                     this._executeQueryDocumentsPage(firstItemIndex)
                   }
                 />
               )}
-            </SplitterLayout>
-          </div>
-        </div>
+            </Allotment.Pane>
+          </Allotment>
+        </CosmosFluentProvider>
         {this.props.copilotEnabled && this.props.copilotStore?.showFeedbackModal && (
           <QueryCopilotFeedbackModal
             explorer={this.props.collection.container}
@@ -745,7 +810,7 @@ export default class QueryTabComponent extends React.Component<IQueryTabComponen
   render(): JSX.Element {
     const shouldScaleElements = this.state.showCopilotSidebar && this.isCopilotTabActive;
     return (
-      <div style={{ display: "flex", flexDirection: "row", height: "100%" }}>
+      <div data-test="QueryTab" style={{ display: "flex", flexDirection: "row", height: "100%" }}>
         <div style={{ width: shouldScaleElements ? "70%" : "100%", height: "100%" }}>
           {this.getEditorAndQueryResult()}
         </div>

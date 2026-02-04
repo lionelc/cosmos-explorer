@@ -89,6 +89,7 @@ export class CapabilityNames {
   public static readonly EnableMongo: string = "EnableMongo";
   public static readonly EnableServerless: string = "EnableServerless";
   public static readonly EnableNoSQLVectorSearch: string = "EnableNoSQLVectorSearch";
+  public static readonly EnableNoSQLFullTextSearch: string = "EnableNoSQLFullTextSearch";
 }
 
 export enum CapacityMode {
@@ -96,6 +97,12 @@ export enum CapacityMode {
   Serverless = "Serverless",
 }
 
+export enum WorkloadType {
+  Learning = "Learning",
+  DevelopmentTesting = "Development/Testing",
+  Production = "Production",
+  None = "None",
+}
 // flight names returned from the portal are always lowercase
 export class Flights {
   public static readonly SettingsV2 = "settingsv2";
@@ -118,6 +125,7 @@ export class AfecFeatures {
 
 export class TagNames {
   public static defaultExperience: string = "defaultExperience";
+  public static WorkloadType: string = "hidden-workload-type";
 }
 
 export class MongoDBAccounts {
@@ -130,12 +138,6 @@ export enum MongoBackendEndpointType {
   remote,
 }
 
-export class BackendApi {
-  public static readonly GenerateToken: string = "GenerateToken";
-  public static readonly PortalSettings: string = "PortalSettings";
-  public static readonly AccountRestrictions: string = "AccountRestrictions";
-}
-
 export class PortalBackendEndpoints {
   public static readonly Development: string = "https://localhost:7235";
   public static readonly Mpac: string = "https://cdb-ms-mpac-pbe.cosmos.azure.com";
@@ -145,11 +147,23 @@ export class PortalBackendEndpoints {
 }
 
 export class MongoProxyEndpoints {
-  public static readonly Local: string = "https://localhost:7238";
+  public static readonly Development: string = "https://localhost:7238";
   public static readonly Mpac: string = "https://cdb-ms-mpac-mp.cosmos.azure.com";
   public static readonly Prod: string = "https://cdb-ms-prod-mp.cosmos.azure.com";
   public static readonly Fairfax: string = "https://cdb-ff-prod-mp.cosmos.azure.us";
   public static readonly Mooncake: string = "https://cdb-mc-prod-mp.cosmos.azure.cn";
+}
+
+export class MongoProxyApi {
+  public static readonly ResourceList: string = "ResourceList";
+  public static readonly QueryDocuments: string = "QueryDocuments";
+  public static readonly CreateDocument: string = "CreateDocument";
+  public static readonly ReadDocument: string = "ReadDocument";
+  public static readonly UpdateDocument: string = "UpdateDocument";
+  public static readonly DeleteDocument: string = "DeleteDocument";
+  public static readonly CreateCollectionWithProxy: string = "CreateCollectionWithProxy";
+  public static readonly LegacyMongoShell: string = "LegacyMongoShell";
+  public static readonly BulkDelete: string = "BulkDelete";
 }
 
 export class CassandraProxyEndpoints {
@@ -181,6 +195,12 @@ export class CassandraProxyAPIs {
   public static readonly connectionStringKeysApi: string = "api/connectionstring/cassandra/keys";
   public static readonly schemaApi: string = "api/cassandra/schema";
   public static readonly connectionStringSchemaApi: string = "api/connectionstring/cassandra/schema";
+}
+
+export class AadEndpoints {
+  public static readonly Prod: string = "https://login.microsoftonline.com/";
+  public static readonly Fairfax: string = "https://login.microsoftonline.us/";
+  public static readonly Mooncake: string = "https://login.partner.microsoftonline.cn/";
 }
 
 export class Queries {
@@ -228,6 +248,7 @@ export class Areas {
   public static ShareDialog: string = "Share Access Dialog";
   public static Notebook: string = "Notebook";
   public static Copilot: string = "Copilot";
+  public static CloudShell: string = "Cloud Shell";
 }
 
 export class HttpHeaders {
@@ -284,6 +305,7 @@ export class HttpStatusCodes {
   public static readonly Accepted: number = 202;
   public static readonly NoContent: number = 204;
   public static readonly NotModified: number = 304;
+  public static readonly BadRequest: number = 400;
   public static readonly Unauthorized: number = 401;
   public static readonly Forbidden: number = 403;
   public static readonly NotFound: number = 404;
@@ -495,7 +517,19 @@ export class PriorityLevel {
   public static readonly Default = "low";
 }
 
-export const QueryCopilotSampleDatabaseId = "CopilotSampleDb";
+export class ariaLabelForLearnMoreLink {
+  public static readonly AnalyticalStore = "Learn more about analytical store.";
+  public static readonly AzureSynapseLink = "Learn more about Azure Synapse Link.";
+}
+
+export class GlobalSecondaryIndexLabels {
+  public static readonly NewGlobalSecondaryIndex: string = "New Global Secondary Index";
+}
+export class FeedbackLabels {
+  public static readonly provideFeedback: string = "Provide feedback";
+}
+
+export const QueryCopilotSampleDatabaseId = "CopilotSampleDB";
 export const QueryCopilotSampleContainerId = "SampleContainer";
 
 export const QueryCopilotSampleContainerSchema = {

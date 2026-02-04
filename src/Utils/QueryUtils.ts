@@ -1,19 +1,34 @@
 import { PartitionKey, PartitionKeyDefinition } from "@azure/cosmos";
+import { configContext, Platform } from "ConfigContext";
+import { getRUThreshold, ruThresholdEnabled } from "Shared/StorageUtility";
+import { userContext } from "UserContext";
+import { logConsoleWarning } from "Utils/NotificationConsoleUtils";
 import * as DataModels from "../Contracts/DataModels";
 import * as ViewModels from "../Contracts/ViewModels";
+
+export const defaultQueryFields = ["id", "_self", "_rid", "_ts"];
 
 export function buildDocumentsQuery(
   filter: string,
   partitionKeyProperties: string[],
   partitionKey: DataModels.PartitionKey,
+  additionalField: string[] = [],
 ): string {
+  const fieldSet = new Set<string>(defaultQueryFields);
+  additionalField.forEach((prop) => {
+    if (!partitionKeyProperties.includes(prop)) {
+      fieldSet.add(prop);
+    }
+  });
+
+  const objectListSpec = [...fieldSet].map((prop) => `c.${prop}`).join(",");
   let query =
     partitionKeyProperties && partitionKeyProperties.length > 0
-      ? `select c.id, c._self, c._rid, c._ts, [${buildDocumentsQueryPartitionProjections(
+      ? `select ${objectListSpec}, [${buildDocumentsQueryPartitionProjections(
           "c",
           partitionKey,
         )}] as _partitionKeyValue from c`
-      : `select c.id, c._self, c._rid, c._ts from c`;
+      : `select ${objectListSpec} from c`;
 
   if (filter) {
     query += " " + filter;
@@ -36,6 +51,7 @@ export function buildDocumentsQueryPartitionProjections(
   for (const index in partitionKey.paths) {
     // TODO: Handle "/" in partition key definitions
     const projectedProperties: string[] = partitionKey.paths[index].split("/").slice(1);
+    const isSystemPartitionKey: boolean = partitionKey.systemKey || false;
     let projectedProperty = "";
 
     projectedProperties.forEach((property: string) => {
@@ -50,8 +66,17 @@ export function buildDocumentsQueryPartitionProjections(
         projectedProperty += `[${projection}]`;
       }
     });
-
-    projections.push(`${collectionAlias}${projectedProperty}`);
+    const fullAccess = `${collectionAlias}${projectedProperty}`;
+    if (
+      !isSystemPartitionKey &&
+      configContext.platform !== Platform.Emulator &&
+      configContext.platform !== Platform.VNextEmulator
+    ) {
+      const wrappedProjection = `IIF(IS_DEFINED(${fullAccess}), ${fullAccess}, {})`;
+      projections.push(wrappedProjection);
+    } else {
+      projections.push(fullAccess);
+    }
   }
 
   return projections.join(",");
@@ -69,6 +94,18 @@ export const queryPagesUntilContentPresent = async (
     results.roundTrips = roundTrips;
     results.requestCharge = Number(results.requestCharge) + netRequestCharge;
     netRequestCharge = Number(results.requestCharge);
+
+    if (results.hasMoreResults && userContext.apiType === "SQL" && ruThresholdEnabled()) {
+      const ruThreshold: number = getRUThreshold();
+      if (netRequestCharge > ruThreshold) {
+        logConsoleWarning(
+          `Warning: Query has exceeded the Request Unit threshold of ${ruThreshold} RUs. Query results show only those documents returned before the threshold was exceeded`,
+        );
+        results.ruThresholdExceeded = true;
+        return results;
+      }
+    }
+
     const resultsMetadata = {
       hasMoreResults: results.hasMoreResults,
       itemCount: results.itemCount,
@@ -85,6 +122,24 @@ export const queryPagesUntilContentPresent = async (
 };
 
 /* eslint-disable  @typescript-eslint/no-explicit-any */
+export const getValueForPath = (content: any, pathSegments: string[]): any => {
+  if (pathSegments.length === 0) {
+    return undefined;
+  }
+
+  let currentValue = content;
+
+  for (const segment of pathSegments) {
+    if (!currentValue || currentValue[segment] === undefined) {
+      return undefined;
+    }
+    currentValue = currentValue[segment];
+  }
+
+  return currentValue;
+};
+
+/* eslint-disable  @typescript-eslint/no-explicit-any */
 export const extractPartitionKeyValues = (
   documentContent: any,
   partitionKeyDefinition: PartitionKeyDefinition,
@@ -94,11 +149,17 @@ export const extractPartitionKeyValues = (
   }
 
   const partitionKeyValues: PartitionKey[] = [];
+
   partitionKeyDefinition.paths.forEach((partitionKeyPath: string) => {
-    const partitionKeyPathWithoutSlash: string = partitionKeyPath.substring(1);
-    if (documentContent[partitionKeyPathWithoutSlash]) {
-      partitionKeyValues.push(documentContent[partitionKeyPathWithoutSlash]);
+    const pathSegments: string[] = partitionKeyPath.substring(1).split("/");
+    const value = getValueForPath(documentContent, pathSegments);
+
+    if (value !== undefined) {
+      partitionKeyValues.push(value);
+    } else if (!partitionKeyDefinition.systemKey) {
+      partitionKeyValues.push({});
     }
   });
+
   return partitionKeyValues;
 };

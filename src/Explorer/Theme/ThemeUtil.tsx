@@ -1,6 +1,8 @@
 import {
   BrandVariants,
+  ComponentProps,
   FluentProvider,
+  FluentProviderSlots,
   Theme,
   createLightTheme,
   makeStyles,
@@ -10,16 +12,19 @@ import {
   webLightTheme,
 } from "@fluentui/react-components";
 import { Platform, configContext } from "ConfigContext";
-import React, { PropsWithChildren } from "react";
+import React from "react";
 import { appThemeFabricTealBrandRamp } from "../../Platform/Fabric/FabricTheme";
 
 export const LayoutConstants = {
-  rowHeight: 36,
+  rowHeight: 32,
 };
 
-export type CosmosFluentProviderProps = PropsWithChildren<{
-  className?: string;
-}>;
+// Our CosmosFluentProvider has the same props as a FluentProvider.
+export type CosmosFluentProviderProps = Omit<ComponentProps<FluentProviderSlots, "root">, "dir">;
+
+// PropsWithChildren<{
+//   className?: string;
+// }>;
 
 const useDefaultRootStyles = makeStyles({
   fluentProvider: {
@@ -32,15 +37,37 @@ const useDefaultRootStyles = makeStyles({
   },
 });
 
-export const CosmosFluentProvider: React.FC<CosmosFluentProviderProps> = ({ children, className }) => {
+const FluentProviderContext = React.createContext({
+  isInFluentProvider: false,
+});
+
+export const CosmosFluentProvider: React.FC<CosmosFluentProviderProps> = ({ children, className, ...props }) => {
+  // We use a React context to ensure that nested CosmosFluentProviders don't create nested FluentProviders.
+  // This helps during the transition from Fluent UI 8 to Fluent UI 9.
+  // As we convert components to Fluent UI 9, if we end up with nested FluentProviders, the inner FluentProvider will be a no-op.
+  const { isInFluentProvider } = React.useContext(FluentProviderContext);
   const styles = useDefaultRootStyles();
+
+  if (isInFluentProvider) {
+    // We're already in a fluent context, don't create another.
+    console.warn("Nested CosmosFluentProvider detected. This is likely a bug.");
+    return (
+      <div className={className} {...props}>
+        {children}
+      </div>
+    );
+  }
+
   return (
-    <FluentProvider
-      theme={getPlatformTheme(configContext.platform)}
-      className={mergeClasses(styles.fluentProvider, className)}
-    >
-      {children}
-    </FluentProvider>
+    <FluentProviderContext.Provider value={{ isInFluentProvider: true }}>
+      <FluentProvider
+        theme={getPlatformTheme(configContext.platform)}
+        className={mergeClasses(styles.fluentProvider, className)}
+        {...props}
+      >
+        {children}
+      </FluentProvider>
+    </FluentProviderContext.Provider>
   );
 };
 
@@ -64,15 +91,30 @@ const appThemePortalBrandRamp: BrandVariants = {
   160: "#CDD8EF",
 };
 
-const cosmosThemeElements = {
-  layoutRowHeight: `${LayoutConstants.rowHeight}px`,
+export enum LayoutSize {
+  Compact,
+  // TODO: Cozy and Roomy layouts.
+}
+
+interface CosmosThemeElements {
+  layoutRowHeight: string;
+}
+
+export type CosmosTheme = Theme & CosmosThemeElements;
+
+const sizeMappings: Record<LayoutSize, Partial<Theme> & CosmosThemeElements> = {
+  [LayoutSize.Compact]: {
+    layoutRowHeight: "32px",
+    fontSizeBase300: "13px",
+  },
+};
+
+const cosmosTheme = {
   sidebarMinimumWidth: "200px",
   sidebarInitialWidth: "300px",
 };
 
-export type CosmosTheme = Theme & typeof cosmosThemeElements;
-
-export const tokens = themeToTokensObject({ ...webLightTheme, ...cosmosThemeElements });
+export const tokens = themeToTokensObject({ ...webLightTheme, ...cosmosTheme, ...sizeMappings[LayoutSize.Compact] });
 
 export const cosmosShorthands = {
   border: () => shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
@@ -90,6 +132,7 @@ export function getPlatformTheme(platform: Platform): CosmosTheme {
 
   return {
     ...baseTheme,
-    ...cosmosThemeElements,
+    ...cosmosTheme,
+    ...sizeMappings[LayoutSize.Compact], // TODO: Allow for different layout sizes.
   };
 }

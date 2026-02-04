@@ -1,4 +1,4 @@
-import { deleteDocument } from "Common/MongoProxyClient";
+import { deleteDocuments } from "Common/MongoProxyClient";
 import { Platform, updateConfigContext } from "ConfigContext";
 import { EditorReactProps } from "Explorer/Controls/Editor/EditorReact";
 import { useCommandBar } from "Explorer/Menus/CommandBar/CommandBarComponentAdapter";
@@ -49,7 +49,9 @@ jest.mock("Common/MongoProxyClient", () => ({
       id: "id1",
     }),
   ),
-  deleteDocument: jest.fn(() => Promise.resolve()),
+  deleteDocuments: jest.fn(() => Promise.resolve({ deleteCount: 0, isAcknowledged: true })),
+  ThrottlingError: Error,
+  useMongoProxyEndpoint: jest.fn(() => true),
 }));
 
 jest.mock("Explorer/Controls/Editor/EditorReact", () => ({
@@ -63,6 +65,13 @@ jest.mock("Explorer/Controls/Dialog", () => ({
       showOkModalDialog: () => {},
     })),
   },
+}));
+
+// Added as recent change to @azure/core-util would cause randomUUID() to throw an error during jest tests.
+// TODO: when not using beta version of @azure/cosmos sdk try removing this
+jest.mock("@azure/core-util", () => ({
+  ...jest.requireActual("@azure/core-util"),
+  randomUUID: jest.fn(),
 }));
 
 async function waitForComponentToPaint<P = unknown>(wrapper: ReactWrapper<P> | ShallowWrapper<P>, amount = 0) {
@@ -178,9 +187,9 @@ describe("Documents tab (Mongo API)", () => {
       expect(useCommandBar.getState().contextButtons.find((button) => button.id === DISCARD_BUTTON_ID)).toBeDefined();
     });
 
-    it("clicking Delete Document asks for confirmation", () => {
-      const mockDeleteDocument = deleteDocument as jest.Mock;
-      mockDeleteDocument.mockClear();
+    it("clicking Delete Document eventually calls delete client api", () => {
+      const mockDeleteDocuments = deleteDocuments as jest.Mock;
+      mockDeleteDocuments.mockClear();
 
       act(() => {
         useCommandBar
@@ -189,7 +198,7 @@ describe("Documents tab (Mongo API)", () => {
           .onCommandClick(undefined);
       });
 
-      expect(mockDeleteDocument).toHaveBeenCalled();
+      expect(mockDeleteDocuments).toHaveBeenCalled();
     });
   });
 });

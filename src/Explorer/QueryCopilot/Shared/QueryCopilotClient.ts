@@ -1,7 +1,6 @@
 import { FeedOptions } from "@azure/cosmos";
 import {
   Areas,
-  BackendApi,
   ConnectionStatusType,
   ContainerStatusType,
   HttpStatusCodes,
@@ -13,6 +12,7 @@ import {
 import { getErrorMessage, getErrorStack, handleError } from "Common/ErrorHandlingUtils";
 import { shouldEnableCrossPartitionKey } from "Common/HeadersUtility";
 import { MinimalQueryIterator } from "Common/IteratorUtilities";
+import QueryError from "Common/QueryError";
 import { createUri } from "Common/UrlUtility";
 import { queryDocumentsPage } from "Common/dataAccess/queryDocumentsPage";
 import { configContext } from "ConfigContext";
@@ -25,17 +25,15 @@ import {
 import { AuthorizationTokenHeaderMetadata, QueryResults } from "Contracts/ViewModels";
 import { useDialog } from "Explorer/Controls/Dialog";
 import Explorer from "Explorer/Explorer";
-import { querySampleDocuments } from "Explorer/QueryCopilot/QueryCopilotUtilities";
+import { querySampleDocuments, readCopilotToggleStatus } from "Explorer/QueryCopilot/QueryCopilotUtilities";
 import { FeedbackParams, GenerateSQLQueryResponse } from "Explorer/QueryCopilot/Shared/QueryCopilotInterfaces";
 import { Action } from "Shared/Telemetry/TelemetryConstants";
 import { traceFailure, traceStart, traceSuccess } from "Shared/Telemetry/TelemetryProcessor";
 import { userContext } from "UserContext";
 import { getAuthorizationHeader } from "Utils/AuthorizationUtils";
-import { useNewPortalBackendEndpoint } from "Utils/EndpointUtils";
 import { queryPagesUntilContentPresent } from "Utils/QueryUtils";
 import { QueryCopilotState, useQueryCopilot } from "hooks/useQueryCopilot";
 import { useTabs } from "hooks/useTabs";
-import * as StringUtility from "../../../Shared/StringUtility";
 
 async function fetchWithTimeout(
   url: string,
@@ -82,9 +80,7 @@ export const isCopilotFeatureRegistered = async (subscriptionId: string): Promis
 };
 
 export const getCopilotEnabled = async (): Promise<boolean> => {
-  const backendEndpoint: string = useNewPortalBackendEndpoint(BackendApi.PortalSettings)
-    ? configContext.PORTAL_BACKEND_ENDPOINT
-    : configContext.BACKEND_ENDPOINT;
+  const backendEndpoint: string = configContext.PORTAL_BACKEND_ENDPOINT;
 
   const url = `${backendEndpoint}/api/portalsettings/querycopilot`;
   const authorizationHeader: AuthorizationTokenHeaderMetadata = getAuthorizationHeader();
@@ -354,24 +350,23 @@ export const QueryDocumentsPerPage = async (
     );
 
     useQueryCopilot.getState().setQueryResults(queryResults);
-    useQueryCopilot.getState().setErrorMessage("");
+    useQueryCopilot.getState().setErrors([]);
     useQueryCopilot.getState().setShowErrorMessageBar(false);
     traceSuccess(Action.ExecuteQueryGeneratedFromQueryCopilot, {
       correlationId: useQueryCopilot.getState().correlationId,
     });
   } catch (error) {
-    const isCopilotActive = StringUtility.toBoolean(
-      localStorage.getItem(`${userContext.databaseAccount?.id}-queryCopilotToggleStatus`),
-    );
+    const isCopilotActive = readCopilotToggleStatus(userContext.databaseAccount);
     const errorMessage = getErrorMessage(error);
     traceFailure(Action.ExecuteQueryGeneratedFromQueryCopilot, {
       correlationId: useQueryCopilot.getState().correlationId,
-      errorMessage: errorMessage,
+      errorMessage,
     });
     handleError(errorMessage, "executeQueryCopilotTab");
     useTabs.getState().setIsQueryErrorThrown(true);
     if (isCopilotActive) {
-      useQueryCopilot.getState().setErrorMessage(errorMessage);
+      const queryErrors = QueryError.tryParse(error);
+      useQueryCopilot.getState().setErrors(queryErrors);
       useQueryCopilot.getState().setShowErrorMessageBar(true);
     }
   } finally {

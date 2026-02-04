@@ -6,6 +6,8 @@ export interface ArmEntity {
   location: string;
   type: string;
   kind: string;
+  tags?: Tags;
+  resourceGroup?: string;
 }
 
 export interface DatabaseAccount extends ArmEntity {
@@ -31,6 +33,7 @@ export interface DatabaseAccountExtendedProperties {
   writeLocations?: DatabaseAccountResponseLocation[];
   enableFreeTier?: boolean;
   enableAnalyticalStorage?: boolean;
+  enableMaterializedViews?: boolean;
   isVirtualNetworkFilterEnabled?: boolean;
   ipRules?: IpRule[];
   privateEndpointConnections?: unknown[];
@@ -159,9 +162,12 @@ export interface Collection extends Resource {
   analyticalStorageTtl?: number;
   geospatialConfig?: GeospatialConfig;
   vectorEmbeddingPolicy?: VectorEmbeddingPolicy;
+  fullTextPolicy?: FullTextPolicy;
   schema?: ISchema;
   requestSchema?: () => void;
   computedProperties?: ComputedProperties;
+  materializedViews?: MaterializedView[];
+  materializedViewDefinition?: MaterializedViewDefinition;
 }
 
 export interface CollectionsWithPagination {
@@ -199,11 +205,19 @@ export interface IndexingPolicy {
   compositeIndexes?: any[];
   spatialIndexes?: any[];
   vectorIndexes?: VectorIndex[];
+  fullTextIndexes?: FullTextIndex[];
 }
 
 export interface VectorIndex {
   path: string;
   type: "flat" | "diskANN" | "quantizedFlat";
+  vectorIndexShardKey?: string[];
+  indexingSearchListSize?: number;
+  quantizationByteSize?: number;
+}
+
+export interface FullTextIndex {
+  path: string;
 }
 
 export interface ComputedProperty {
@@ -212,6 +226,17 @@ export interface ComputedProperty {
 }
 
 export type ComputedProperties = ComputedProperty[];
+
+export interface MaterializedView {
+  id: string;
+  _rid: string;
+}
+
+export interface MaterializedViewDefinition {
+  definition: string;
+  sourceCollectionId: string;
+  sourceCollectionRid?: string;
+}
 
 export interface PartitionKey {
   paths: string[];
@@ -265,6 +290,12 @@ export interface Offer {
   offerReplacePending: boolean;
   instantMaximumThroughput?: number;
   softAllowedMaximumThroughput?: number;
+  throughputBuckets?: ThroughputBucket[];
+}
+
+export interface ThroughputBucket {
+  id: number;
+  maxThroughputPercentage: number;
 }
 
 export interface SDKOfferDefinition extends Resource {
@@ -329,9 +360,7 @@ export interface CreateDatabaseParams {
   offerThroughput?: number;
 }
 
-export interface CreateCollectionParams {
-  createNewDatabase: boolean;
-  collectionId: string;
+export interface CreateCollectionParamsBase {
   databaseId: string;
   databaseLevelThroughput: boolean;
   offerThroughput?: number;
@@ -342,6 +371,17 @@ export interface CreateCollectionParams {
   uniqueKeyPolicy?: UniqueKeyPolicy;
   createMongoWildcardIndex?: boolean;
   vectorEmbeddingPolicy?: VectorEmbeddingPolicy;
+  fullTextPolicy?: FullTextPolicy;
+}
+
+export interface CreateCollectionParams extends CreateCollectionParamsBase {
+  createNewDatabase: boolean;
+  collectionId: string;
+}
+
+export interface CreateMaterializedViewsParams extends CreateCollectionParamsBase {
+  materializedViewId: string;
+  materializedViewDefinition: MaterializedViewDefinition;
 }
 
 export interface VectorEmbeddingPolicy {
@@ -349,10 +389,20 @@ export interface VectorEmbeddingPolicy {
 }
 
 export interface VectorEmbedding {
-  dataType: "float16" | "float32" | "uint8" | "int8";
+  dataType: "float32" | "uint8" | "int8";
   dimensions: number;
   distanceFunction: "euclidean" | "cosine" | "dotproduct";
   path: string;
+}
+
+export interface FullTextPolicy {
+  defaultLanguage: string;
+  fullTextPaths: FullTextPath[];
+}
+
+export interface FullTextPath {
+  path: string;
+  language: string;
 }
 
 export interface ReadDatabaseOfferParams {
@@ -376,6 +426,7 @@ export interface UpdateOfferParams {
   collectionId?: string;
   migrateToAutoPilot?: boolean;
   migrateToManual?: boolean;
+  throughputBuckets?: ThroughputBucket[];
 }
 
 export interface Notification {
@@ -643,3 +694,5 @@ export interface FeatureRegistration {
     state: string;
   };
 }
+
+export type Tags = { [key: string]: string };

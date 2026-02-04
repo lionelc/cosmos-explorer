@@ -20,11 +20,11 @@ const isCI = require("is-ci");
 
 const gitSha = childProcess.execSync("git rev-parse HEAD").toString("utf8");
 
-const AZURE_CLIENT_ID = "fd8753b0-0707-4e32-84e9-2532af865fb4";
 const AZURE_TENANT_ID = "72f988bf-86f1-41af-91ab-2d7cd011db47";
-const SUBSCRIPTION_ID = "69e02f2d-f059-4409-9eac-97e8a276ae2c";
-const RESOURCE_GROUP = "runners";
+const RESOURCE_GROUP = "de-e2e-tests";
 const AZURE_CLIENT_SECRET = process.env.AZURE_CLIENT_SECRET || process.env.NOTEBOOKS_TEST_RUNNER_CLIENT_SECRET; // TODO Remove. Exists for backwards compat with old .env files. Prefer AZURE_CLIENT_SECRET
+
+const ishttps = process.env.GATEWAY_TLS_ENABLED !== "false"; // false -> false, true -> true, default -> true
 
 if (!AZURE_CLIENT_SECRET) {
   console.warn("AZURE_CLIENT_SECRET is not set. testExplorer.html will not work.");
@@ -80,11 +80,18 @@ const typescriptRule = {
   exclude: /node_modules/,
 };
 
+const javascriptRule = {
+  test: /\.m?js$/,
+  resolve: {
+    fullySpecified: false,
+  },
+};
+
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 /** @type {(_env: Record<string, string>, argv: Record<string, unknown>) => import("webpack").Configuration} */
 module.exports = function (_env = {}, argv = {}) {
   const mode = argv.mode || "development";
-  const rules = [fontRule, lessRule, imagesRule, cssRule, htmlRule, typescriptRule];
+  const rules = [fontRule, lessRule, imagesRule, cssRule, htmlRule, typescriptRule, javascriptRule];
   const envVars = {
     GIT_SHA: gitSha,
     PORT: process.env.PORT || "1234",
@@ -96,31 +103,43 @@ module.exports = function (_env = {}, argv = {}) {
 
   if (mode === "development") {
     envVars.NODE_ENV = "development";
-    envVars.AZURE_CLIENT_ID = AZURE_CLIENT_ID;
-    envVars.AZURE_TENANT_ID = AZURE_TENANT_ID;
     envVars.AZURE_CLIENT_SECRET = AZURE_CLIENT_SECRET || null;
-    envVars.SUBSCRIPTION_ID = SUBSCRIPTION_ID;
     envVars.RESOURCE_GROUP = RESOURCE_GROUP;
     typescriptRule.use[0].options.compilerOptions = { target: "ES2018" };
   }
 
-  const plugins = [
-    new CleanWebpackPlugin(),
-    new webpack.ProvidePlugin({
-      process: "process/browser",
-      Buffer: ["buffer", "Buffer"],
-    }),
-    new CreateFileWebpack({
-      path: "./dist",
-      fileName: "version.txt",
-      content: `${gitSha.trim()} ${new Date().toUTCString()}`,
-    }),
-    // TODO Enable when @nteract once removed
-    // ./node_modules/@nteract/markdown/node_modules/@nteract/presentational-components/lib/index.js line 63 breaks this with physical file Icon.js referred to as icon.js
-    // new CaseSensitivePathsPlugin(),
-    new MiniCssExtractPlugin({
-      filename: "[name].[contenthash].css",
-    }),
+  const entry = {
+    main: "./src/Main.tsx",
+    index: "./src/Index.tsx",
+    quickstart: "./src/quickstart.ts",
+    hostedExplorer: "./src/HostedExplorer.tsx",
+    terminal: "./src/Terminal/index.ts",
+    cellOutputViewer: "./src/CellOutputViewer/CellOutputViewer.tsx",
+    notebookViewer: "./src/NotebookViewer/NotebookViewer.tsx",
+    galleryViewer: "./src/GalleryViewer/GalleryViewer.tsx",
+    selfServe: "./src/SelfServe/SelfServe.tsx",
+    connectToGitHub: "./src/GitHub/GitHubConnector.ts",
+    ...(mode !== "production" && { testExplorer: "./test/testExplorer/TestExplorer.ts" }),
+  };
+
+  // Derive emulator endpoint components from EMULATOR_ENDPOINT (fallback to localhost defaults)
+  const rawEndpoint = process.env.EMULATOR_ENDPOINT || (ishttps ? "https://localhost:8081/" : "http://localhost:8081/");
+  let endpointProtocol = ishttps ? "https" : "http";
+  let endpointHost = "localhost";
+  let endpointPort = "8081";
+  try {
+    const u = new URL(rawEndpoint);
+    endpointProtocol = u.protocol.replace(":", "");
+    endpointHost = u.hostname;
+    endpointPort = u.port || (endpointProtocol === "https" ? "443" : "80");
+  } catch (e) {
+    // Ignore parse errors and keep defaults
+  }
+  const endpointUri = `${endpointProtocol}://${endpointHost}:${endpointPort}`;
+  const primaryKeyConst = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";
+  const primaryConnString = `AccountEndpoint=${endpointUri}/;AccountKey=${primaryKeyConst}`;
+
+  const htmlWebpackPlugins = [
     new HtmlWebpackPlugin({
       filename: "explorer.html",
       template: "src/explorer.html",
@@ -131,10 +150,16 @@ module.exports = function (_env = {}, argv = {}) {
       template: "src/Terminal/index.html",
       chunks: ["terminal"],
     }),
+    //todo - dynamically include apis
     new HtmlWebpackPlugin({
       filename: "quickstart.html",
-      template: "src/quickstart.html",
+      template: "src/quickstart-sql.template.ejs",
       chunks: ["quickstart"],
+      templateParameters: {
+        endpointUri,
+        primaryKey: primaryKeyConst,
+        primaryConnString,
+      },
     }),
     new HtmlWebpackPlugin({
       filename: "index.html",
@@ -145,16 +170,6 @@ module.exports = function (_env = {}, argv = {}) {
       filename: "hostedExplorer.html",
       template: "src/hostedExplorer.html",
       chunks: ["hostedExplorer"],
-    }),
-    new HtmlWebpackPlugin({
-      filename: "testExplorer.html",
-      template: "test/testExplorer/testExplorer.html",
-      chunks: ["testExplorer"],
-    }),
-    new HtmlWebpackPlugin({
-      filename: "Heatmap.html",
-      template: "src/Controls/Heatmap/Heatmap.html",
-      chunks: ["heatmap"],
     }),
     new HtmlWebpackPlugin({
       filename: "cellOutputViewer.html",
@@ -181,16 +196,59 @@ module.exports = function (_env = {}, argv = {}) {
       template: "src/SelfServe/selfServe.html",
       chunks: ["selfServe"],
     }),
+    ...(mode !== "production"
+      ? [
+          new HtmlWebpackPlugin({
+            filename: "testExplorer.html",
+            template: "test/testExplorer/testExplorer.html",
+            chunks: ["testExplorer"],
+          }),
+        ]
+      : []),
+  ];
+
+  const plugins = [
+    new CleanWebpackPlugin(),
+    new webpack.ProvidePlugin({
+      process: "process/browser",
+      Buffer: ["buffer", "Buffer"],
+    }),
+    new CreateFileWebpack({
+      path: "./dist",
+      fileName: "version.txt",
+      content: `${gitSha.trim()} ${new Date().toUTCString()}`,
+    }),
+    // TODO Enable when @nteract once removed
+    // ./node_modules/@nteract/markdown/node_modules/@nteract/presentational-components/lib/index.js line 63 breaks this with physical file Icon.js referred to as icon.js
+    // new CaseSensitivePathsPlugin(),
+    new MiniCssExtractPlugin({
+      filename: "[name].[contenthash].css",
+    }),
+    ...htmlWebpackPlugins,
     new InlineChunkHtmlPlugin(HtmlWebpackPlugin, [/cellOutputViewer/]),
     new HTMLInlineCSSWebpackPlugin({
       filter: (fileName) => fileName.includes("cellOutputViewer"),
     }),
     new MonacoWebpackPlugin(),
     new CopyWebpackPlugin({
-      patterns: [{ from: "DataExplorer.nuspec" }, { from: "web.config" }, { from: "quickstart/*.zip" }],
+      patterns: [
+        { from: "DataExplorer.nuspec" },
+        { from: "DataExplorer.proj" },
+        { from: "web.config" },
+        { from: "quickstart/*.zip" },
+        { from: "images", to: "images" },
+      ],
     }),
     new EnvironmentPlugin(envVars),
   ];
+
+  if (process.env.EXPLORER_CONFIG_PATH) {
+    plugins.push(
+      new CopyWebpackPlugin({
+        patterns: [{ from: process.env.EXPLORER_CONFIG_PATH, to: "config.json" }],
+      }),
+    );
+  }
 
   if (argv.analyze) {
     plugins.push(new BundleAnalyzerPlugin());
@@ -198,20 +256,7 @@ module.exports = function (_env = {}, argv = {}) {
 
   return {
     mode: mode,
-    entry: {
-      main: "./src/Main.tsx",
-      index: "./src/Index.tsx",
-      quickstart: "./src/quickstart.ts",
-      hostedExplorer: "./src/HostedExplorer.tsx",
-      testExplorer: "./test/testExplorer/TestExplorer.ts",
-      heatmap: "./src/Controls/Heatmap/Heatmap.ts",
-      terminal: "./src/Terminal/index.ts",
-      cellOutputViewer: "./src/CellOutputViewer/CellOutputViewer.tsx",
-      notebookViewer: "./src/NotebookViewer/NotebookViewer.tsx",
-      galleryViewer: "./src/GalleryViewer/GalleryViewer.tsx",
-      selfServe: "./src/SelfServe/SelfServe.tsx",
-      connectToGitHub: "./src/GitHub/GitHubConnector.ts",
-    },
+    entry: entry,
     output: {
       chunkFilename: "[name].[chunkhash:6].js",
       filename: "[name].[chunkhash:6].js",
@@ -248,7 +293,8 @@ module.exports = function (_env = {}, argv = {}) {
         new TerserPlugin({
           terserOptions: {
             // These options increase our initial bundle size by ~5% but the builds are significantly faster and won't run out of memory
-            compress: false,
+            // Update 2/11/2025: we are removing this flag as our bundles sizes grew so that it can remove dead and unreachable code with compromise of build time
+            // compress: false,
             mangle: {
               keep_fnames: true,
               keep_classnames: true,
@@ -268,7 +314,7 @@ module.exports = function (_env = {}, argv = {}) {
       // disableHostCheck: true,
       liveReload: !isCI,
       server: {
-        type: "https",
+        type: ishttps ? "https" : "http",
       },
       host: "0.0.0.0",
       port: envVars.PORT,
@@ -301,7 +347,7 @@ module.exports = function (_env = {}, argv = {}) {
       },
       proxy: {
         "/api": {
-          target: "https://main.documentdb.ext.azure.com",
+          target: "https://cdb-ms-mpac-pbe.cosmos.azure.com",
           changeOrigin: true,
           logLevel: "debug",
           bypass: (req, res) => {
@@ -312,7 +358,7 @@ module.exports = function (_env = {}, argv = {}) {
           },
         },
         "/proxy": {
-          target: "https://main.documentdb.ext.azure.com",
+          target: "https://cdb-ms-mpac-pbe.cosmos.azure.com",
           changeOrigin: true,
           secure: false,
           logLevel: "debug",

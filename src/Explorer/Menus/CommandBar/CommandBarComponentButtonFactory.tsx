@@ -1,4 +1,6 @@
 import { KeyboardAction } from "KeyboardShortcuts";
+import { isDataplaneRbacSupported } from "Utils/APITypeUtils";
+import { areAdvancedScriptsSupported, isFeatureSupported, PlatformFeature } from "Utils/PlatformFeatureUtils";
 import * as React from "react";
 import { useEffect, useState } from "react";
 import AddSqlQueryIcon from "../../../../images/AddSqlQuery_16x16.svg";
@@ -13,9 +15,10 @@ import OpenQueryFromDiskIcon from "../../../../images/OpenQueryFromDisk.svg";
 import OpenInTabIcon from "../../../../images/open-in-tab.svg";
 import SettingsIcon from "../../../../images/settings_15x15.svg";
 import SynapseIcon from "../../../../images/synapse-link.svg";
+import VSCodeIcon from "../../../../images/vscode.svg";
 import { AuthType } from "../../../AuthType";
 import * as Constants from "../../../Common/Constants";
-import { Platform, configContext } from "../../../ConfigContext";
+import { configContext, Platform } from "../../../ConfigContext";
 import * as ViewModels from "../../../Contracts/ViewModels";
 import { userContext } from "../../../UserContext";
 import { isRunningOnNationalCloud } from "../../../Utils/CloudUtils";
@@ -50,6 +53,7 @@ export function createStaticCommandBarButtons(
   };
 
   if (
+    isFeatureSupported(PlatformFeature.SynapseLink) &&
     configContext.platform !== Platform.Fabric &&
     userContext.apiType !== "Tables" &&
     userContext.apiType !== "Cassandra"
@@ -59,9 +63,15 @@ export function createStaticCommandBarButtons(
       addDivider();
       buttons.push(addSynapseLink);
     }
+    if (userContext.apiType !== "Gremlin") {
+      const addVsCode = createOpenVsCodeDialogButton(container);
+      if (addVsCode) {
+        buttons.push(addVsCode);
+      }
+    }
   }
 
-  if (userContext.apiType === "SQL") {
+  if (isDataplaneRbacSupported(userContext.apiType)) {
     const [loginButtonProps, setLoginButtonProps] = useState<CommandButtonComponentProps | undefined>(undefined);
     const dataPlaneRbacEnabled = useDataPlaneRbac((state) => state.dataPlaneRbacEnabled);
     const aadTokenUpdated = useDataPlaneRbac((state) => state.aadTokenUpdated);
@@ -125,13 +135,14 @@ export function createContextCommandBarButtons(
   const buttons: CommandButtonComponentProps[] = [];
 
   if (!selectedNodeState.isDatabaseNodeOrNoneSelected() && userContext.apiType === "Mongo") {
-    const label = useNotebook.getState().isShellEnabled ? "Open Mongo Shell" : "New Shell";
+    const label =
+      useNotebook.getState().isShellEnabled || userContext.features.enableCloudShell ? "Open Mongo Shell" : "New Shell";
     const newMongoShellBtn: CommandButtonComponentProps = {
       iconSrc: HostedTerminalIcon,
       iconAlt: label,
       onCommandClick: () => {
         const selectedCollection: ViewModels.Collection = selectedNodeState.findSelectedCollection();
-        if (useNotebook.getState().isShellEnabled) {
+        if (useNotebook.getState().isShellEnabled || userContext.features.enableCloudShell) {
           container.openNotebookTerminal(ViewModels.TerminalKind.Mongo);
         } else {
           selectedCollection && selectedCollection.onNewMongoShellClick();
@@ -145,7 +156,7 @@ export function createContextCommandBarButtons(
   }
 
   if (
-    useNotebook.getState().isShellEnabled &&
+    (useNotebook.getState().isShellEnabled || userContext.features.enableCloudShell) &&
     !selectedNodeState.isDatabaseNodeOrNoneSelected() &&
     userContext.apiType === "Cassandra"
   ) {
@@ -167,22 +178,18 @@ export function createContextCommandBarButtons(
 }
 
 export function createControlCommandBarButtons(container: Explorer): CommandButtonComponentProps[] {
-  const buttons: CommandButtonComponentProps[] =
-    configContext.platform === Platform.Fabric && userContext.fabricContext?.isReadOnly
-      ? []
-      : [
-          {
-            iconSrc: SettingsIcon,
-            iconAlt: "Settings",
-            onCommandClick: () =>
-              useSidePanel.getState().openSidePanel("Settings", <SettingsPane explorer={container} />),
-            commandButtonLabel: undefined,
-            ariaLabel: "Settings",
-            tooltipText: "Settings",
-            hasPopup: true,
-            disabled: false,
-          },
-        ];
+  const buttons: CommandButtonComponentProps[] = [
+    {
+      iconSrc: SettingsIcon,
+      iconAlt: "Settings",
+      onCommandClick: () => useSidePanel.getState().openSidePanel("Settings", <SettingsPane explorer={container} />),
+      commandButtonLabel: undefined,
+      ariaLabel: "Settings",
+      tooltipText: "Settings",
+      hasPopup: true,
+      disabled: false,
+    },
+  ];
 
   const showOpenFullScreen =
     configContext.platform === Platform.Portal && !isRunningOnNationalCloud() && userContext.apiType !== "Gremlin";
@@ -239,11 +246,17 @@ export function createDivider(): CommandButtonComponentProps {
 
 function areScriptsSupported(): boolean {
   return (
-    configContext.platform !== Platform.Fabric && (userContext.apiType === "SQL" || userContext.apiType === "Gremlin")
+    areAdvancedScriptsSupported() &&
+    configContext.platform !== Platform.Fabric &&
+    (userContext.apiType === "SQL" || userContext.apiType === "Gremlin")
   );
 }
 
 function createOpenSynapseLinkDialogButton(container: Explorer): CommandButtonComponentProps {
+  if (!isFeatureSupported(PlatformFeature.SynapseLink)) {
+    return undefined;
+  }
+
   if (configContext.platform === Platform.Emulator) {
     return undefined;
   }
@@ -266,6 +279,22 @@ function createOpenSynapseLinkDialogButton(container: Explorer): CommandButtonCo
     hasPopup: false,
     disabled:
       useSelectedNode.getState().isQueryCopilotCollectionSelected() || useNotebook.getState().isSynapseLinkUpdating,
+    ariaLabel: label,
+  };
+}
+
+function createOpenVsCodeDialogButton(container: Explorer): CommandButtonComponentProps {
+  if (!isFeatureSupported(PlatformFeature.VSCodeIntegration)) {
+    return undefined;
+  }
+
+  const label = "Visual Studio Code";
+  return {
+    iconSrc: VSCodeIcon,
+    iconAlt: label,
+    onCommandClick: () => container.openInVsCode(),
+    commandButtonLabel: label,
+    hasPopup: false,
     ariaLabel: label,
   };
 }
@@ -458,7 +487,7 @@ function createOpenTerminalButtonByKind(
     iconSrc: HostedTerminalIcon,
     iconAlt: label,
     onCommandClick: () => {
-      if (useNotebook.getState().isNotebookEnabled) {
+      if (useNotebook.getState().isNotebookEnabled || userContext.features.enableCloudShell) {
         container.openNotebookTerminal(terminalKind);
       }
     },
@@ -502,6 +531,6 @@ export function createPostgreButtons(container: Explorer): CommandButtonComponen
 
 export function createVCoreMongoButtons(container: Explorer): CommandButtonComponentProps[] {
   const openVCoreMongoTerminalButton = createOpenTerminalButtonByKind(container, ViewModels.TerminalKind.VCoreMongo);
-
-  return [openVCoreMongoTerminalButton];
+  const addVsCode = createOpenVsCodeDialogButton(container);
+  return [openVCoreMongoTerminalButton, addVsCode];
 }

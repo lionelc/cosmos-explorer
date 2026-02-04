@@ -18,8 +18,9 @@ import {
   Text,
   TextField,
 } from "@fluentui/react";
-import { HttpStatusCodes } from "Common/Constants";
+import { FeedbackLabels, HttpStatusCodes, NormalizedEventKey } from "Common/Constants";
 import { handleError } from "Common/ErrorHandlingUtils";
+import QueryError, { QueryErrorSeverity } from "Common/QueryError";
 import { createUri } from "Common/UrlUtility";
 import { CopyPopup } from "Explorer/QueryCopilot/Popup/CopyPopup";
 import { DeletePopup } from "Explorer/QueryCopilot/Popup/DeletePopup";
@@ -27,6 +28,8 @@ import {
   SuggestedPrompt,
   getSampleDatabaseSuggestedPrompts,
   getSuggestedPrompts,
+  readPromptHistory,
+  savePromptHistory,
 } from "Explorer/QueryCopilot/QueryCopilotUtilities";
 import { SubmitFeedback, allocatePhoenixContainer } from "Explorer/QueryCopilot/Shared/QueryCopilotClient";
 import { GenerateSQLQueryResponse, QueryCopilotProps } from "Explorer/QueryCopilot/Shared/QueryCopilotInterfaces";
@@ -34,7 +37,7 @@ import { SamplePrompts, SamplePromptsProps } from "Explorer/QueryCopilot/Shared/
 import { Action } from "Shared/Telemetry/TelemetryConstants";
 import { userContext } from "UserContext";
 import { useQueryCopilot } from "hooks/useQueryCopilot";
-import React, { useRef, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import HintIcon from "../../../images/Hint.svg";
 import RecentIcon from "../../../images/Recent.svg";
 import errorIcon from "../../../images/close-black.svg";
@@ -70,6 +73,9 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
 }: QueryCopilotPromptProps): JSX.Element => {
   const [copilotTeachingBubbleVisible, setCopilotTeachingBubbleVisible] = useState<boolean>(false);
   const inputEdited = useRef(false);
+  const itemRefs = useRef([]);
+  const searchInputRef = useRef(null);
+  const copyQueryRef = useRef(null);
   const {
     openFeedbackModal,
     hideFeedbackModalForLikedQueries,
@@ -105,10 +111,10 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
     setShowErrorMessageBar,
     setGeneratedQueryComments,
     setQueryResults,
-    setErrorMessage,
-    errorMessage,
+    setErrors,
+    errors,
   } = useCopilotStore();
-
+  const [focusedIndex, setFocusedIndex] = useState(-1);
   const sampleProps: SamplePromptsProps = {
     isSamplePromptsOpen: isSamplePromptsOpen,
     setIsSamplePromptsOpen: setIsSamplePromptsOpen,
@@ -127,20 +133,20 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
     document.body.removeChild(queryElement);
 
     setshowCopyPopup(true);
+    copyQueryRef.current.focus();
     setTimeout(() => {
       setshowCopyPopup(false);
     }, 6000);
   };
 
   const isSampleCopilotActive = useSelectedNode.getState().isQueryCopilotCollectionSelected();
-  const cachedHistoriesString = localStorage.getItem(`${userContext.databaseAccount?.id}-queryCopilotHistories`);
-  const cachedHistories = cachedHistoriesString?.split("|");
-  const [histories, setHistories] = useState<string[]>(cachedHistories || []);
+  const [histories, setHistories] = useState<string[]>(() => readPromptHistory(userContext.databaseAccount));
   const suggestedPrompts: SuggestedPrompt[] = isSampleCopilotActive
     ? getSampleDatabaseSuggestedPrompts()
     : getSuggestedPrompts();
   const [filteredHistories, setFilteredHistories] = useState<string[]>(histories);
   const [filteredSuggestedPrompts, setFilteredSuggestedPrompts] = useState<SuggestedPrompt[]>(suggestedPrompts);
+  const { UpArrow, DownArrow, Enter } = NormalizedEventKey;
 
   const handleUserPromptChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     inputEdited.current = true;
@@ -168,7 +174,7 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
     const newHistories = [formattedUserPrompt, ...updatedHistories.slice(0, 2)];
 
     setHistories(newHistories);
-    localStorage.setItem(`${userContext.databaseAccount.id}-queryCopilotHistories`, newHistories.join("|"));
+    savePromptHistory(userContext.databaseAccount, newHistories);
   };
 
   const resetMessageStates = (): void => {
@@ -179,7 +185,7 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
 
   const resetQueryResults = (): void => {
     setQueryResults(null);
-    setErrorMessage("");
+    setErrors([]);
   };
 
   const generateSQLQuery = async (): Promise<void> => {
@@ -243,7 +249,12 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
         handleError(JSON.stringify(generateSQLQueryResponse), "copilotTooManyRequestError");
         useTabs.getState().setIsQueryErrorThrown(true);
         setShowErrorMessageBar(true);
-        setErrorMessage("Ratelimit exceeded 5 per 1 minute. Please try again after sometime");
+        setErrors([
+          new QueryError(
+            "Ratelimit exceeded 5 per 1 minute. Please try again after sometime",
+            QueryErrorSeverity.Error,
+          ),
+        ]);
         TelemetryProcessor.traceFailure(Action.QueryGenerationFromCopilotPrompt, {
           databaseName: databaseId,
           collectionId: containerId,
@@ -296,12 +307,43 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
     if (isGeneratingQuery === null) {
       return " ";
     } else if (isGeneratingQuery) {
-      return "Content is loading";
+      return "Thinking";
     } else {
       return "Content is updated";
     }
   };
+  const openSamplePrompts = () => {
+    inputEdited.current = true;
+    setShowSamplePrompts(true);
+  };
+  const totalSuggestions = useMemo(
+    () => [...filteredSuggestedPrompts, ...filteredHistories],
+    [filteredSuggestedPrompts, filteredHistories],
+  );
 
+  const handleKeyDownForInput = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === DownArrow) {
+      setFocusedIndex(0);
+      itemRefs.current[0]?.current?.focus();
+    } else if (event.key === Enter && userPrompt) {
+      inputEdited.current = true;
+      startGenerateQueryProcess();
+    }
+  };
+
+  const handleKeyDownForItem = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === UpArrow && focusedIndex > 0) {
+      itemRefs.current[focusedIndex - 1].current?.focus();
+      setFocusedIndex((prevIndex) => prevIndex - 1);
+    } else if (event.key === DownArrow && focusedIndex < totalSuggestions.length - 1) {
+      itemRefs.current[focusedIndex + 1].current?.focus();
+      setFocusedIndex((prevIndex) => prevIndex + 1);
+    }
+  };
+
+  React.useEffect(() => {
+    itemRefs.current = totalSuggestions.map(() => React.createRef());
+  }, [totalSuggestions]);
   React.useEffect(() => {
     useTabs.getState().setIsQueryErrorThrown(false);
   }, []);
@@ -331,23 +373,14 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
               id="naturalLanguageInput"
               value={userPrompt}
               onChange={handleUserPromptChange}
-              onClick={() => {
-                inputEdited.current = true;
-                setShowSamplePrompts(true);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && userPrompt) {
-                  inputEdited.current = true;
-                  startGenerateQueryProcess();
-                }
-              }}
+              onClick={openSamplePrompts}
+              onFocus={() => setShowSamplePrompts(true)}
+              elementRef={searchInputRef}
+              onKeyDown={handleKeyDownForInput}
               style={{ lineHeight: 30 }}
               styles={{
                 root: { width: "100%" },
-                suffix: {
-                  background: "none",
-                  padding: 0,
-                },
+                suffix: { background: "none", padding: 0 },
                 fieldGroup: {
                   borderRadius: 4,
                   borderColor: "#D1D1D1",
@@ -368,6 +401,7 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
                   <IconButton
                     iconProps={{ iconName: "Send" }}
                     disabled={isGeneratingQuery || !userPrompt.trim()}
+                    allowDisabledFocus={true}
                     style={{ background: "none" }}
                     onClick={() => startGenerateQueryProcess()}
                     aria-label="Send"
@@ -432,6 +466,8 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
                             setShowSamplePrompts(false);
                             inputEdited.current = true;
                           }}
+                          elementRef={itemRefs.current[i]}
+                          onKeyDown={handleKeyDownForItem}
                           onRenderIcon={() => <Image src={RecentIcon} styles={{ root: { overflow: "unset" } }} />}
                           styles={promptStyles}
                         >
@@ -454,14 +490,16 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
                       >
                         Suggested Prompts
                       </Text>
-                      {filteredSuggestedPrompts.map((prompt) => (
+                      {filteredSuggestedPrompts.map((prompt, index) => (
                         <DefaultButton
                           key={prompt.id}
+                          elementRef={itemRefs.current[filteredHistories.length + index]}
                           onClick={() => {
                             setUserPrompt(prompt.text);
                             setShowSamplePrompts(false);
                             inputEdited.current = true;
                           }}
+                          onKeyDown={handleKeyDownForItem}
                           onRenderIcon={() => <Image src={HintIcon} />}
                           styles={promptStyles}
                         >
@@ -514,7 +552,9 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
                   </Link>
                   {showErrorMessageBar && (
                     <MessageBar messageBarType={MessageBarType.error}>
-                      {errorMessage ? errorMessage : "We ran into an error and were not able to execute query."}
+                      {errors.length > 0
+                        ? errors[0].message
+                        : "We ran into an error and were not able to execute query."}
                     </MessageBar>
                   )}
                   {showInvalidQueryMessageBar && (
@@ -539,7 +579,7 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
                 <Stack horizontal verticalAlign="center" style={{ maxHeight: 20 }}>
                   {userContext.feedbackPolicies?.policyAllowFeedback && (
                     <Stack horizontal verticalAlign="center">
-                      <Text style={{ fontSize: 12 }}>Provide feedback</Text>
+                      <Text style={{ fontSize: 12 }}>{FeedbackLabels.provideFeedback}</Text>
                       {showCallout && !hideFeedbackModalForLikedQueries && (
                         <Callout
                           role="status"
@@ -589,8 +629,9 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
                       <IconButton
                         id="likeBtn"
                         style={{ marginLeft: 10 }}
-                        aria-label="Like"
-                        role="toggle"
+                        aria-label={FeedbackLabels.provideFeedback}
+                        role="button"
+                        title="Like"
                         iconProps={{ iconName: likeQuery === true ? "LikeSolid" : "Like" }}
                         onClick={() => {
                           setShowCallout(!likeQuery);
@@ -608,8 +649,9 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
                       />
                       <IconButton
                         style={{ margin: "0 4px" }}
-                        role="toggle"
-                        aria-label="Dislike"
+                        role="button"
+                        aria-label={FeedbackLabels.provideFeedback}
+                        title="Dislike"
                         iconProps={{ iconName: dislikeQuery === true ? "DislikeSolid" : "Dislike" }}
                         onClick={() => {
                           let toggleStatusValue = "Unpressed";
@@ -638,6 +680,7 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
                   )}
                   <CommandBarButton
                     className="copyQuery"
+                    elementRef={copyQueryRef}
                     onClick={copyGeneratedCode}
                     iconProps={{ iconName: "Copy" }}
                     style={{ fontSize: 12, transition: "background-color 0.3s ease", height: "100%" }}
@@ -667,6 +710,9 @@ export const QueryCopilotPromptbar: React.FC<QueryCopilotPromptProps> = ({
                 </Stack>
               )}
             </Stack>
+          )}
+          {(showFeedbackBar || isGeneratingQuery) && (
+            <span role="alert" className="screenReaderOnly" aria-label={getAriaLabel()} />
           )}
           {isGeneratingQuery && (
             <ProgressIndicator

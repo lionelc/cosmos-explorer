@@ -17,7 +17,7 @@ export const useTreeStyles = makeStyles({
     minWidth: "100%",
     rowGap: "0px",
     paddingTop: "0px",
-    [treeIconWidth]: "20px",
+    [treeIconWidth]: "16px",
     [leafNodeSpacing]: "24px",
   },
   nodeIcon: {
@@ -25,12 +25,13 @@ export const useTreeStyles = makeStyles({
     height: `var(${treeIconWidth})`,
   },
   treeItem: {},
-  nodeLabel: {},
+  nodeLabel: {
+    whiteSpace: "nowrap", // Don't wrap text, there will be a scrollbar.
+  },
   treeItemLayout: {
     fontSize: tokens.fontSizeBase300,
     height: tokens.layoutRowHeight,
     ...cosmosShorthands.borderBottom(),
-    paddingLeft: `calc(var(${treeItemLevelToken}, 1) * ${tokens.spacingHorizontalXXL})`,
 
     // Some sneaky CSS variables stuff to change the background color of the action button on hover.
     [actionButtonBackground]: tokens.colorNeutralBackground1,

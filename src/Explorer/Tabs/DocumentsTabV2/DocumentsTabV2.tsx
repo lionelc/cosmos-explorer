@@ -1,10 +1,17 @@
 import { Item, ItemDefinition, PartitionKey, PartitionKeyDefinition, QueryIterator, Resource } from "@azure/cosmos";
-import { Button, Input, TableRowId, makeStyles, shorthands } from "@fluentui/react-components";
-import { ArrowClockwise16Filled, Dismiss16Filled } from "@fluentui/react-icons";
-import { KeyCodes, QueryCopilotSampleContainerId, QueryCopilotSampleDatabaseId } from "Common/Constants";
+import {
+  Button,
+  Link,
+  MessageBar,
+  MessageBarBody,
+  MessageBarTitle,
+  TableRowId,
+  makeStyles,
+  shorthands,
+} from "@fluentui/react-components";
+import { QueryCopilotSampleContainerId, QueryCopilotSampleDatabaseId } from "Common/Constants";
 import { getErrorMessage, getErrorStack } from "Common/ErrorHandlingUtils";
 import MongoUtility from "Common/MongoUtility";
-import { StyleConstants } from "Common/StyleConstants";
 import { createDocument } from "Common/dataAccess/createDocument";
 import {
   deleteDocument as deleteNoSqlDocument,
@@ -13,28 +20,42 @@ import {
 import { queryDocuments } from "Common/dataAccess/queryDocuments";
 import { readDocument } from "Common/dataAccess/readDocument";
 import { updateDocument } from "Common/dataAccess/updateDocument";
-import { Platform, configContext } from "ConfigContext";
+import { ActionType, OpenCollectionTab, TabKind } from "Contracts/ActionContracts";
 import { CommandButtonComponentProps } from "Explorer/Controls/CommandButton/CommandButtonComponent";
 import { useDialog } from "Explorer/Controls/Dialog";
 import { EditorReact } from "Explorer/Controls/Editor/EditorReact";
-import Explorer from "Explorer/Explorer";
+import { InputDataList, InputDatalistDropdownOptionSection } from "Explorer/Controls/InputDataList/InputDataList";
+import { ProgressModalDialog } from "Explorer/Controls/ProgressModalDialog";
 import { useCommandBar } from "Explorer/Menus/CommandBar/CommandBarComponentAdapter";
 import { querySampleDocuments, readSampleDocument } from "Explorer/QueryCopilot/QueryCopilotUtilities";
+import {
+  ColumnsSelection,
+  FilterHistory,
+  SubComponentName,
+  TabDivider,
+  deleteDocumentsTabSubComponentState,
+  readDocumentsTabSubComponentState,
+  saveDocumentsTabSubComponentState,
+} from "Explorer/Tabs/DocumentsTabV2/DocumentsTabStateUtil";
+import { usePrevious } from "Explorer/Tabs/DocumentsTabV2/SelectionHelper";
 import { CosmosFluentProvider, LayoutConstants, cosmosShorthands, tokens } from "Explorer/Theme/ThemeUtil";
 import { useSelectedNode } from "Explorer/useSelectedNode";
 import { KeyboardAction, KeyboardActionGroup, useKeyboardActionGroup } from "KeyboardShortcuts";
+import { isFabric } from "Platform/Fabric/FabricUtil";
 import { QueryConstants } from "Shared/Constants";
 import { LocalStorageUtility, StorageKey } from "Shared/StorageUtility";
 import { Action } from "Shared/Telemetry/TelemetryConstants";
 import { userContext } from "UserContext";
-import { logConsoleError } from "Utils/NotificationConsoleUtils";
+import { logConsoleError, logConsoleInfo } from "Utils/NotificationConsoleUtils";
 import { Allotment } from "allotment";
+import { useClientWriteEnabled } from "hooks/useClientWriteEnabled";
 import React, { KeyboardEventHandler, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { format } from "react-string-format";
 import DeleteDocumentIcon from "../../../../images/DeleteDocument.svg";
 import NewDocumentIcon from "../../../../images/NewDocument.svg";
 import UploadIcon from "../../../../images/Upload_16x16.svg";
 import DiscardIcon from "../../../../images/discard.svg";
+import RefreshIcon from "../../../../images/refresh-cosmos.svg";
 import SaveIcon from "../../../../images/save-cosmos.svg";
 import * as Constants from "../../../Common/Constants";
 import * as HeadersUtility from "../../../Common/HeadersUtility";
@@ -42,13 +63,20 @@ import * as Logger from "../../../Common/Logger";
 import * as MongoProxyClient from "../../../Common/MongoProxyClient";
 import * as DataModels from "../../../Contracts/DataModels";
 import * as ViewModels from "../../../Contracts/ViewModels";
+import { CollectionBase, UploadDetailsRecord } from "../../../Contracts/ViewModels";
 import * as TelemetryProcessor from "../../../Shared/Telemetry/TelemetryProcessor";
 import * as QueryUtils from "../../../Utils/QueryUtils";
-import { extractPartitionKeyValues } from "../../../Utils/QueryUtils";
+import { defaultQueryFields, extractPartitionKeyValues } from "../../../Utils/QueryUtils";
 import DocumentId from "../../Tree/DocumentId";
 import ObjectId from "../../Tree/ObjectId";
 import TabsBase from "../TabsBase";
-import { DocumentsTableComponent, DocumentsTableComponentItem } from "./DocumentsTableComponent";
+import { ColumnDefinition, DocumentsTableComponent, DocumentsTableComponentItem } from "./DocumentsTableComponent";
+
+const MAX_FILTER_HISTORY_COUNT = 100; // Datalist will become scrollable, so we can afford to keep more items than fit on the screen
+const NO_SQL_THROTTLING_DOC_URL =
+  "https://learn.microsoft.com/azure/cosmos-db/nosql/troubleshoot-request-rate-too-large";
+const MONGO_THROTTLING_DOC_URL = "https://learn.microsoft.com/azure/cosmos-db/mongodb/prevent-rate-limiting-errors";
+const DATA_EXPLORER_DOC_URL = "https://learn.microsoft.com/en-us/azure/cosmos-db/data-explorer";
 
 const loadMoreHeight = LayoutConstants.rowHeight;
 export const useDocumentsTabStyles = makeStyles({
@@ -65,12 +93,6 @@ export const useDocumentsTabStyles = makeStyles({
     alignItems: "center",
     ...cosmosShorthands.borderBottom(),
   },
-  filterInput: {
-    flexGrow: 1,
-  },
-  appliedFilter: {
-    flexGrow: 1,
-  },
   tableContainer: {
     marginRight: tokens.spacingHorizontalXXXL,
   },
@@ -79,6 +101,13 @@ export const useDocumentsTabStyles = makeStyles({
   },
   tableCell: {
     ...cosmosShorthands.borderLeft(),
+  },
+  tableHeader: {
+    display: "flex",
+  },
+  tableHeaderFiller: {
+    width: "20px",
+    boxShadow: `0px -1px ${tokens.colorNeutralStroke2} inset`,
   },
   loadMore: {
     ...cosmosShorthands.borderTop(),
@@ -103,6 +132,24 @@ export const useDocumentsTabStyles = makeStyles({
     backgroundColor: "white",
     zIndex: 1,
   },
+  refreshBtn: {
+    position: "absolute",
+    top: "3px",
+    right: "4px",
+    float: "right",
+    zIndex: 1,
+    backgroundColor: "transparent",
+  },
+  deleteProgressContent: {
+    paddingTop: tokens.spacingVerticalL,
+  },
+  smallScreenContent: {
+    "@media (max-width: 420px)": {
+      flexWrap: "wrap",
+      minHeight: "max-content",
+      padding: "4px",
+    },
+  },
 });
 
 export class DocumentsTabV2 extends TabsBase {
@@ -111,6 +158,8 @@ export class DocumentsTabV2 extends TabsBase {
   private title: string;
   private resourceTokenPartitionKey: string;
 
+  protected persistedState: OpenCollectionTab;
+
   constructor(options: ViewModels.DocumentsTabOptions) {
     super(options);
 
@@ -118,6 +167,13 @@ export class DocumentsTabV2 extends TabsBase {
     this.title = options.title;
     this.partitionKey = options.partitionKey;
     this.resourceTokenPartitionKey = options.resourceTokenPartitionKey;
+
+    this.persistedState = {
+      actionType: ActionType.OpenCollectionTab,
+      tabKind: options.isPreferredApiMongoDB ? TabKind.MongoDocuments : TabKind.SQLDocuments,
+      databaseResourceId: options.collection.databaseId,
+      collectionResourceId: options.collection.id(),
+    };
   }
 
   public render(): JSX.Element {
@@ -252,35 +308,17 @@ type UiKeyboardEvent = (e: KeyboardEvent | React.SyntheticEvent<Element, Event>)
 
 // Export to expose to unit tests
 export type ButtonsDependencies = {
-  _collection: ViewModels.CollectionBase;
   selectedRows: Set<TableRowId>;
   editorState: ViewModels.DocumentExplorerState;
   isPreferredApiMongoDB: boolean;
+  clientWriteEnabled: boolean;
   onNewDocumentClick: UiKeyboardEvent;
   onSaveNewDocumentClick: UiKeyboardEvent;
   onRevertNewDocumentClick: UiKeyboardEvent;
   onSaveExistingDocumentClick: UiKeyboardEvent;
   onRevertExistingDocumentClick: UiKeyboardEvent;
   onDeleteExistingDocumentsClick: UiKeyboardEvent;
-};
-
-const createUploadButton = (container: Explorer): CommandButtonComponentProps => {
-  const label = "Upload Item";
-  return {
-    id: UPLOAD_BUTTON_ID,
-    iconSrc: UploadIcon,
-    iconAlt: label,
-    onCommandClick: () => {
-      const selectedCollection: ViewModels.Collection = useSelectedNode.getState().findSelectedCollection();
-      selectedCollection && container.openUploadItemsPanePane();
-    },
-    commandButtonLabel: label,
-    ariaLabel: label,
-    hasPopup: true,
-    disabled:
-      useSelectedNode.getState().isDatabaseNodeOrNoneSelected() ||
-      useSelectedNode.getState().isQueryCopilotCollectionSelected(),
-  };
+  onUploadDocumentsClick: UiKeyboardEvent;
 };
 
 // Export to expose to unit tests
@@ -293,18 +331,19 @@ export const UPLOAD_BUTTON_ID = "uploadItemBtn";
 
 // Export to expose in unit tests
 export const getTabsButtons = ({
-  _collection,
   selectedRows,
   editorState,
   isPreferredApiMongoDB,
+  clientWriteEnabled,
   onNewDocumentClick,
   onSaveNewDocumentClick,
   onRevertNewDocumentClick,
   onSaveExistingDocumentClick,
   onRevertExistingDocumentClick,
   onDeleteExistingDocumentsClick,
+  onUploadDocumentsClick,
 }: ButtonsDependencies): CommandButtonComponentProps[] => {
-  if (configContext.platform === Platform.Fabric && userContext.fabricContext?.isReadOnly) {
+  if (isFabric() && userContext.fabricContext?.isReadOnly) {
     // All the following buttons require write access
     return [];
   }
@@ -322,6 +361,7 @@ export const getTabsButtons = ({
       hasPopup: false,
       disabled:
         !getNewDocumentButtonState(editorState).enabled ||
+        !clientWriteEnabled ||
         useSelectedNode.getState().isQueryCopilotCollectionSelected(),
       id: NEW_DOCUMENT_BUTTON_ID,
     });
@@ -339,6 +379,7 @@ export const getTabsButtons = ({
       hasPopup: false,
       disabled:
         !getSaveNewDocumentButtonState(editorState).enabled ||
+        !clientWriteEnabled ||
         useSelectedNode.getState().isQueryCopilotCollectionSelected(),
       id: SAVE_BUTTON_ID,
     });
@@ -373,6 +414,7 @@ export const getTabsButtons = ({
       hasPopup: false,
       disabled:
         !getSaveExistingDocumentButtonState(editorState).enabled ||
+        !clientWriteEnabled ||
         useSelectedNode.getState().isQueryCopilotCollectionSelected(),
       id: UPDATE_BUTTON_ID,
     });
@@ -405,13 +447,26 @@ export const getTabsButtons = ({
       commandButtonLabel: label,
       ariaLabel: label,
       hasPopup: false,
-      disabled: useSelectedNode.getState().isQueryCopilotCollectionSelected(),
+      disabled: useSelectedNode.getState().isQueryCopilotCollectionSelected() || !clientWriteEnabled,
       id: DELETE_BUTTON_ID,
     });
   }
 
   if (!isPreferredApiMongoDB) {
-    buttons.push(createUploadButton(_collection.container));
+    const label = "Upload Item";
+    buttons.push({
+      id: UPLOAD_BUTTON_ID,
+      iconSrc: UploadIcon,
+      iconAlt: label,
+      onCommandClick: onUploadDocumentsClick,
+      commandButtonLabel: label,
+      ariaLabel: label,
+      hasPopup: true,
+      disabled:
+        useSelectedNode.getState().isDatabaseNodeOrNoneSelected() ||
+        !useClientWriteEnabled.getState().clientWriteEnabled ||
+        useSelectedNode.getState().isQueryCopilotCollectionSelected(),
+    });
   }
 
   return buttons;
@@ -460,17 +515,51 @@ export const showPartitionKey = (collection: ViewModels.CollectionBase, isPrefer
 };
 
 // Export to expose to unit tests
+/**
+ * Build default query
+ * @param isMongo true if mongo api
+ * @param filter
+ * @param partitionKeyProperties optional for mongo
+ * @param partitionKey  optional for mongo
+ * @param additionalField
+ * @returns
+ */
 export const buildQuery = (
   isMongo: boolean,
   filter: string,
   partitionKeyProperties?: string[],
   partitionKey?: DataModels.PartitionKey,
+  additionalField?: string[],
 ): string => {
   if (isMongo) {
     return filter || "{}";
   }
 
-  return QueryUtils.buildDocumentsQuery(filter, partitionKeyProperties, partitionKey);
+  // Filter out fields starting with "/" (partition keys)
+  return QueryUtils.buildDocumentsQuery(
+    filter,
+    partitionKeyProperties,
+    partitionKey,
+    additionalField?.filter((f) => !f.startsWith("/")) || [],
+  );
+};
+
+/**
+ * Export to expose to unit tests
+ *
+ * Add array2 to array1 without duplicates
+ * @param array1
+ * @param array2
+ * @return array1 with array2 added without duplicates
+ */
+export const addStringsNoDuplicate = (array1: string[], array2: string[]): string[] => {
+  const result = [...array1];
+  array2.forEach((item) => {
+    if (!result.includes(item)) {
+      result.push(item);
+    }
+  });
+  return result;
 };
 
 // Export to expose to unit tests
@@ -487,6 +576,18 @@ export interface IDocumentsTabComponentProps {
   isTabActive: boolean;
 }
 
+const getDefaultSqlFilters = (partitionKeys: string[]) =>
+  ['WHERE c.id = "foo"', "ORDER BY c._ts DESC", 'WHERE c.id = "foo" ORDER BY c._ts DESC', "ORDER BY c._ts ASC"].concat(
+    partitionKeys.map((partitionKey) => `WHERE c.${partitionKey} = "foo"`),
+  );
+const defaultMongoFilters = ['{"id":"foo"}', "{ qty: { $gte: 20 } }"];
+
+// Extend DocumentId to include fields displayed in the table
+type ExtendedDocumentId = DocumentId & { tableFields?: DocumentsTableComponentItem };
+
+// This is based on some heuristics
+const calculateOffset = (columnNumber: number): number => columnNumber * 16 - 27;
+
 // Export to expose to unit tests
 export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabComponentProps> = ({
   isPreferredApiMongoDB,
@@ -500,14 +601,12 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
   onIsExecutingChange,
   isTabActive,
 }): JSX.Element => {
-  const [isFilterCreated, setIsFilterCreated] = useState<boolean>(true);
-  const [isFilterExpanded, setIsFilterExpanded] = useState<boolean>(false);
-  const [isFilterFocused, setIsFilterFocused] = useState<boolean>(false);
-  const [appliedFilter, setAppliedFilter] = useState<string>("");
-  const [filterContent, setFilterContent] = useState<string>("");
-  const [documentIds, setDocumentIds] = useState<DocumentId[]>([]);
+  const [filterContent, setFilterContent] = useState<string>(() =>
+    readDocumentsTabSubComponentState<string>(SubComponentName.CurrentFilter, _collection, ""),
+  );
+
+  const [documentIds, setDocumentIds] = useState<ExtendedDocumentId[]>([]);
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
-  const filterInput = useRef<HTMLInputElement>(null);
   const styles = useDocumentsTabStyles();
 
   // Query
@@ -527,11 +626,19 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
   // Table user clicked on this row
   const [clickedRowIndex, setClickedRowIndex] = useState<number>(RESET_INDEX);
   // Table multiple selection
-  const [selectedRows, setSelectedRows] = React.useState<Set<TableRowId>>(() => new Set<TableRowId>([0]));
+  const [selectedRows, setSelectedRows] = React.useState<Set<TableRowId>>(() => new Set<TableRowId>());
 
   // Command buttons
   const [editorState, setEditorState] = useState<ViewModels.DocumentExplorerState>(
     ViewModels.DocumentExplorerState.noDocumentSelected,
+  );
+
+  // State
+  const clientWriteEnabled = useClientWriteEnabled((state) => state.clientWriteEnabled);
+  const [tabStateData, setTabStateData] = useState<TabDivider>(() =>
+    readDocumentsTabSubComponentState<TabDivider>(SubComponentName.MainTabDivider, _collection, {
+      leftPaneWidthPercent: 35,
+    }),
   );
 
   const isQueryCopilotSampleContainer =
@@ -542,58 +649,181 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
   // For Mongo only
   const [continuationToken, setContinuationToken] = useState<string>(undefined);
 
+  // User's filter history
+  const [lastFilterContents, setLastFilterContents] = useState<FilterHistory>(() =>
+    readDocumentsTabSubComponentState<FilterHistory>(SubComponentName.FilterHistory, _collection, [] as FilterHistory),
+  );
+
+  // For progress bar for bulk delete (noSql)
+  const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = React.useState(false);
+  const [bulkDeleteProcess, setBulkDeleteProcess] = useState<{
+    pendingIds: DocumentId[];
+    successfulIds: DocumentId[];
+    throttledIds: DocumentId[];
+    failedIds: DocumentId[];
+    beforeExecuteMs: number; // Delay before executing delete. Used for retrying throttling after a specified delay
+    hasBeenThrottled: boolean; // Keep track if the operation has been throttled at least once
+  }>(undefined);
+  const [bulkDeleteOperation, setBulkDeleteOperation] = useState<{
+    onCompleted: (documentIds: DocumentId[]) => void;
+    onFailed: (reason?: unknown) => void;
+    count: number;
+    collection: CollectionBase;
+  }>(undefined);
+  const [bulkDeleteMode, setBulkDeleteMode] = useState<"inProgress" | "completed" | "aborting" | "aborted">(undefined);
+  const [abortController, setAbortController] = useState<AbortController | undefined>(undefined);
+
   const setKeyboardActions = useKeyboardActionGroup(KeyboardActionGroup.ACTIVE_TAB);
 
+  /**
+   * Recursively delete all documents by retrying throttled requests (429).
+   * This only works for NoSQL, because the bulk response includes status for each delete document request.
+   * Recursion is implemented using React useEffect (as opposed to recursively calling setTimeout), because it
+   * has to update the <ProgressModalDialog> or check if the user is aborting the operation via state React
+   * variables.
+   *
+   * Inputs are the bulkDeleteOperation, bulkDeleteProcess and bulkDeleteMode state variables.
+   * When the bulkDeleteProcess changes, the function in the useEffect is triggered and checks if the process
+   * was aborted or completed, which will resolve the promise.
+   * Otherwise, it will attempt to delete documents of the pending and throttled ids arrays.
+   * Once deletion is completed, the function updates bulkDeleteProcess with the results, which will trigger
+   * the function to be called again.
+   */
   useEffect(() => {
-    if (isFilterFocused) {
-      filterInput.current?.focus();
+    if (!bulkDeleteOperation || !bulkDeleteProcess || !bulkDeleteMode) {
+      return;
     }
-  }, [isFilterFocused]);
 
-  // Clicked row must be defined
-  useEffect(() => {
-    if (documentIds.length > 0) {
-      let currentClickedRowIndex = clickedRowIndex;
-      if (
-        (currentClickedRowIndex === RESET_INDEX &&
-          editorState === ViewModels.DocumentExplorerState.noDocumentSelected) ||
-        currentClickedRowIndex > documentIds.length - 1
-      ) {
-        // reset clicked row or the current clicked row is out of bounds
-        currentClickedRowIndex = INITIAL_SELECTED_ROW_INDEX;
-        setSelectedRows(new Set([INITIAL_SELECTED_ROW_INDEX]));
-        onDocumentClicked(currentClickedRowIndex, documentIds);
-      }
+    if (bulkDeleteMode === "completed" || bulkDeleteMode === "aborted") {
+      // no op in the case function is called again
+      return;
     }
-  }, [documentIds, clickedRowIndex, editorState]);
 
-  let lastFilterContents = ['WHERE c.id = "foo"', "ORDER BY c._ts DESC", 'WHERE c.id = "foo" ORDER BY c._ts DESC'];
+    if (bulkDeleteProcess.pendingIds.length === 0 && bulkDeleteProcess.throttledIds.length === 0) {
+      // Successfully deleted all documents
+      bulkDeleteOperation.onCompleted(bulkDeleteProcess.successfulIds);
+      setBulkDeleteMode("completed");
+      return;
+    }
 
-  const applyFilterButton = {
-    enabled: true,
-    visible: true,
-  };
+    if (bulkDeleteMode === "aborting") {
+      // Operation was aborted
+      abortController?.abort();
+      bulkDeleteOperation.onCompleted(bulkDeleteProcess.successfulIds);
+      setBulkDeleteMode("aborted");
+      setAbortController(undefined);
+      return;
+    }
+
+    // Start deleting documents or retry throttled requests
+    const newPendingIds = bulkDeleteProcess.pendingIds.concat(bulkDeleteProcess.throttledIds);
+    const timeout = bulkDeleteProcess.beforeExecuteMs || 0;
+
+    const ac = new AbortController();
+    setAbortController(ac);
+    setTimeout(() => {
+      deleteNoSqlDocuments(bulkDeleteOperation.collection, [...newPendingIds], ac.signal)
+        .then((deleteResult) => {
+          let retryAfterMilliseconds = 0;
+          const newSuccessful: DocumentId[] = [];
+          const newThrottled: DocumentId[] = [];
+          const newFailed: DocumentId[] = [];
+          deleteResult.forEach((result) => {
+            if (result.statusCode === Constants.HttpStatusCodes.NoContent) {
+              newSuccessful.push(result.documentId);
+            } else if (result.statusCode === Constants.HttpStatusCodes.TooManyRequests) {
+              newThrottled.push(result.documentId);
+              retryAfterMilliseconds = Math.max(result.retryAfterMilliseconds, retryAfterMilliseconds);
+            } else if (result.statusCode >= 400) {
+              newFailed.push(result.documentId);
+              logConsoleError(
+                `Failed to delete document ${result.documentId.id()} with status code ${result.statusCode}`,
+              );
+            }
+          });
+
+          logConsoleInfo(`Successfully deleted ${newSuccessful.length} document(s)`);
+
+          if (newThrottled.length > 0) {
+            logConsoleError(
+              `Failed to delete ${newThrottled.length} document(s) due to "Request too large" (429) error. Retrying...`,
+            );
+          }
+
+          // Update result of the bulk delete: method is called again, because the state variables changed
+          // it will decide at the next call what to do
+          setBulkDeleteProcess((prev) => ({
+            pendingIds: [],
+            successfulIds: prev.successfulIds.concat(newSuccessful),
+            throttledIds: newThrottled,
+            failedIds: prev.failedIds.concat(newFailed),
+            beforeExecuteMs: retryAfterMilliseconds,
+            hasBeenThrottled: prev.hasBeenThrottled || newThrottled.length > 0,
+          }));
+        })
+        .catch((error) => {
+          console.error("Error deleting documents", error);
+          setBulkDeleteProcess((prev) => ({
+            pendingIds: [],
+            throttledIds: [],
+            successfulIds: prev.successfulIds,
+            failedIds: prev.failedIds.concat(prev.pendingIds),
+            beforeExecuteMs: undefined,
+            hasBeenThrottled: prev.hasBeenThrottled,
+          }));
+          bulkDeleteOperation.onFailed(error);
+        });
+    }, timeout);
+  }, [bulkDeleteOperation, bulkDeleteProcess, bulkDeleteMode]);
 
   const partitionKey: DataModels.PartitionKey = useMemo(
     () => _partitionKey || (_collection && _collection.partitionKey),
     [_collection, _partitionKey],
   );
   const partitionKeyPropertyHeaders: string[] = useMemo(
-    () => _collection?.partitionKeyPropertyHeaders || partitionKey?.paths,
-    [_collection?.partitionKeyPropertyHeaders, partitionKey?.paths],
-  );
-  let partitionKeyProperties = useMemo(
     () =>
-      partitionKeyPropertyHeaders?.map((partitionKeyPropertyHeader) =>
-        partitionKeyPropertyHeader.replace(/[/]+/g, ".").substring(1).replace(/[']+/g, ""),
-      ),
-    [partitionKeyPropertyHeaders],
+      isPreferredApiMongoDB && partitionKey?.systemKey
+        ? []
+        : _collection?.partitionKeyPropertyHeaders || partitionKey?.paths,
+    [_collection?.partitionKeyPropertyHeaders, partitionKey?.paths, partitionKey?.systemKey, isPreferredApiMongoDB],
   );
+  let partitionKeyProperties = useMemo(() => {
+    return partitionKeyPropertyHeaders?.map((partitionKeyPropertyHeader) =>
+      partitionKeyPropertyHeader.replace(/[/]+/g, ".").substring(1).replace(/[']+/g, ""),
+    );
+  }, [partitionKeyPropertyHeaders]);
+
+  const getInitialColumnSelection = () => {
+    const defaultColumnsIds = ["id"];
+    if (showPartitionKey(_collection, isPreferredApiMongoDB)) {
+      defaultColumnsIds.push(...partitionKeyPropertyHeaders);
+    }
+
+    return defaultColumnsIds;
+  };
+
+  const [selectedColumnIds, setSelectedColumnIds] = useState<string[]>(() => {
+    const persistedColumnsSelection = readDocumentsTabSubComponentState<ColumnsSelection>(
+      SubComponentName.ColumnsSelection,
+      _collection,
+      undefined,
+    );
+
+    if (!persistedColumnsSelection) {
+      return getInitialColumnSelection();
+    }
+
+    return persistedColumnsSelection.selectedColumnIds;
+  });
 
   // new DocumentId() requires a DocumentTab which we mock with only the required properties
   const newDocumentId = useCallback(
-    (rawDocument: DataModels.DocumentId, partitionKeyProperties: string[], partitionKeyValue: string[]) =>
-      new DocumentId(
+    (
+      rawDocument: DataModels.DocumentId,
+      partitionKeyProperties: string[],
+      partitionKeyValue: string[],
+    ): ExtendedDocumentId => {
+      const extendedDocumentId = new DocumentId(
         {
           partitionKey,
           partitionKeyProperties,
@@ -603,7 +833,10 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
         },
         rawDocument,
         partitionKeyValue,
-      ),
+      ) as ExtendedDocumentId;
+      extendedDocumentId.tableFields = { ...rawDocument };
+      return extendedDocumentId;
+    },
     [partitionKey],
   );
 
@@ -614,12 +847,8 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
   // This is executed in onActivate() in the original code.
   useEffect(() => {
     setKeyboardActions({
-      [KeyboardAction.SEARCH]: () => {
-        onShowFilterClick();
-        return true;
-      },
       [KeyboardAction.CLEAR_SEARCH]: () => {
-        setFilterContent("");
+        updateFilterContent("");
         refreshDocumentsGrid(true);
         return true;
       },
@@ -649,16 +878,17 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
     }
 
     updateNavbarWithTabsButtons(isTabActive, {
-      _collection,
       selectedRows,
       editorState,
       isPreferredApiMongoDB,
+      clientWriteEnabled,
       onNewDocumentClick,
       onSaveNewDocumentClick,
       onRevertNewDocumentClick,
       onSaveExistingDocumentClick,
       onRevertExistingDocumentClick,
       onDeleteExistingDocumentsClick,
+      onUploadDocumentsClick,
     });
   }, []);
 
@@ -765,6 +995,10 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
 
           setDocumentIds(ids);
           setEditorState(ViewModels.DocumentExplorerState.existingDocumentNoEdits);
+
+          // Update column choices
+          setColumnDefinitionsFromDocument(savedDocument);
+
           TelemetryProcessor.traceSuccess(
             Action.CreateDocument,
             {
@@ -790,7 +1024,10 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
           );
         },
       )
-      .then(() => setSelectedRows(new Set([documentIds.length - 1])))
+      .then(() => {
+        setSelectedRows(new Set([documentIds.length - 1]));
+        setClickedRowIndex(documentIds.length - 1);
+      })
       .finally(() => setIsExecuting(false));
   }, [
     onExecutionErrorChange,
@@ -818,6 +1055,7 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
     );
 
     const selectedDocumentId = documentIds[clickedRowIndex as number];
+    const originalPartitionKeyValue = selectedDocumentId.partitionKeyValue;
     selectedDocumentId.partitionKeyValue = partitionKeyValueArray;
 
     onExecutionErrorChange(false);
@@ -847,8 +1085,16 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
             },
             startKey,
           );
+
+          // Update column choices
+          selectedDocumentId.tableFields = { ...documentContent };
+          setColumnDefinitionsFromDocument(documentContent);
         },
         (error) => {
+          // in case of any kind of failures of accidently changing partition key, restore the original
+          // so that when user navigates away from current document and comes back,
+          // it doesnt fail to load due to using the invalid partition keys
+          selectedDocumentId.partitionKeyValue = originalPartitionKeyValue;
           onExecutionErrorChange(true);
           const errorMessage = getErrorMessage(error);
           useDialog.getState().showOkModalDialog("Update document failed", errorMessage);
@@ -881,9 +1127,37 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
   }, [initialDocumentContent, selectedDocumentContentBaseline, setSelectedDocumentContent]);
 
   /**
-   * Implementation using bulk delete NoSQL API
+   * Trigger a useEffect() to bulk delete noSql documents
+   * @param collection
+   * @param documentIds
+   * @returns
    */
-  let _deleteDocuments = useCallback(
+  const _bulkDeleteNoSqlDocuments = (collection: CollectionBase, documentIds: DocumentId[]): Promise<DocumentId[]> =>
+    new Promise<DocumentId[]>((resolve, reject) => {
+      setBulkDeleteOperation({
+        onCompleted: resolve,
+        onFailed: reject,
+        count: documentIds.length,
+        collection,
+      });
+      setBulkDeleteProcess({
+        pendingIds: [...documentIds],
+        throttledIds: [],
+        successfulIds: [],
+        failedIds: [],
+        beforeExecuteMs: 0,
+        hasBeenThrottled: false,
+      });
+      setIsBulkDeleteDialogOpen(true);
+      setBulkDeleteMode("inProgress");
+    });
+
+  /**
+   * Implementation using bulk delete NoSQL API
+   * @param list of document ids to delete
+   * @returns Promise of list of deleted document ids
+   */
+  const _deleteDocuments = useCallback(
     async (toDeleteDocumentIds: DocumentId[]): Promise<DocumentId[]> => {
       onExecutionErrorChange(false);
       const startKey: number = TelemetryProcessor.traceStart(Action.DeleteDocuments, {
@@ -892,13 +1166,35 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
       });
       setIsExecuting(true);
 
-      // TODO: Once JS SDK Bug fix for bulk deleting legacy containers (whose systemKey==1) is released:
-      // Remove the check for systemKey, remove call to deleteNoSqlDocument(). deleteNoSqlDocuments() should always be called.
-      return (
-        partitionKey.systemKey
-          ? deleteNoSqlDocument(_collection, toDeleteDocumentIds[0]).then(() => [toDeleteDocumentIds[0]])
-          : deleteNoSqlDocuments(_collection, toDeleteDocumentIds)
-      )
+      let deletePromise;
+      if (!isPreferredApiMongoDB) {
+        if (partitionKey.systemKey) {
+          // ----------------------------------------------------------------------------------------------------
+          // TODO: Once JS SDK Bug fix for bulk deleting legacy containers (whose systemKey==1) is released:
+          // Remove the check for systemKey, remove call to deleteNoSqlDocument(). deleteNoSqlDocuments() should
+          // always be called for NoSQL.
+          deletePromise = deleteNoSqlDocument(_collection, toDeleteDocumentIds[0]).then(() => {
+            useDialog.getState().showOkModalDialog("Delete document", "Document successfully deleted.");
+            return [toDeleteDocumentIds[0]];
+          });
+          // ----------------------------------------------------------------------------------------------------
+        } else {
+          deletePromise = _bulkDeleteNoSqlDocuments(_collection, toDeleteDocumentIds);
+        }
+      } else {
+        deletePromise = MongoProxyClient.deleteDocuments(
+          _collection.databaseId,
+          _collection as ViewModels.Collection,
+          toDeleteDocumentIds,
+        ).then(({ deletedCount, isAcknowledged }) => {
+          if (deletedCount === toDeleteDocumentIds.length && isAcknowledged) {
+            return toDeleteDocumentIds;
+          }
+          throw new Error(`Delete failed with deletedCount: ${deletedCount} and isAcknowledged: ${isAcknowledged}`);
+        });
+      }
+
+      return deletePromise
         .then(
           (deletedIds) => {
             TelemetryProcessor.traceSuccess(
@@ -927,9 +1223,11 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
             throw error;
           },
         )
-        .finally(() => setIsExecuting(false));
+        .finally(() => {
+          setIsExecuting(false);
+        });
     },
-    [_collection, onExecutionErrorChange, tabTitle],
+    [_collection, isPreferredApiMongoDB, onExecutionErrorChange, tabTitle, partitionKey.systemKey],
   );
 
   const deleteDocuments = useCallback(
@@ -947,14 +1245,25 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
             setClickedRowIndex(undefined);
             setSelectedRows(new Set());
             setEditorState(ViewModels.DocumentExplorerState.noDocumentSelected);
-            useDialog
-              .getState()
-              .showOkModalDialog("Delete documents", `${deletedIds.length} document(s) successfully deleted.`);
           },
-          (error: Error) =>
-            useDialog
-              .getState()
-              .showOkModalDialog("Delete documents", `Document(s) deleted failed (${JSON.stringify(error)})`),
+          (error: Error) => {
+            if (error instanceof MongoProxyClient.ThrottlingError) {
+              useDialog
+                .getState()
+                .showOkModalDialog(
+                  "Delete documents",
+                  `Some documents failed to delete due to a rate limiting error. Please try again later. To prevent this in the future, consider increasing the throughput on your container or database.`,
+                  {
+                    linkText: "Learn More",
+                    linkUrl: MONGO_THROTTLING_DOC_URL,
+                  },
+                );
+            } else {
+              useDialog
+                .getState()
+                .showOkModalDialog("Delete documents", `Deleting document(s) failed (${error.message})`);
+            }
+          },
         )
         .finally(() => setIsExecuting(false));
     },
@@ -985,41 +1294,74 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
       );
   }, [deleteDocuments, documentIds, isPreferredApiMongoDB, selectedRows]);
 
+  const onUploadDocumentsClick = useCallback((): void => {
+    if (!isPreferredApiMongoDB) {
+      const onSuccessUpload = (data: UploadDetailsRecord[]) => {
+        const addedIdsSet = new Set(
+          data
+            .reduce(
+              (result: ItemDefinition[], record) =>
+                result.concat(record.resources && record.resources.length ? record.resources : []),
+              [],
+            )
+            .map((document) => {
+              const partitionKeyValueArray: PartitionKey[] = extractPartitionKeyValues(
+                document,
+                partitionKey as PartitionKeyDefinition,
+              );
+              return newDocumentId(
+                document as ItemDefinition & Resource,
+                partitionKeyProperties,
+                partitionKeyValueArray as string[],
+              );
+            }),
+        );
+
+        const documents = new Set(documentIds);
+        addedIdsSet.forEach((item) => documents.add(item));
+        setDocumentIds(Array.from(documents));
+
+        setSelectedDocumentContent(undefined);
+        setClickedRowIndex(undefined);
+        setSelectedRows(new Set());
+        setEditorState(ViewModels.DocumentExplorerState.noDocumentSelected);
+      };
+
+      _collection.container.openUploadItemsPane(onSuccessUpload);
+    }
+  }, [_collection.container, documentIds, isPreferredApiMongoDB, newDocumentId, partitionKey, partitionKeyProperties]);
+
   // If editor state changes, update the nav
   useEffect(
     () =>
       updateNavbarWithTabsButtons(isTabActive, {
-        _collection,
         selectedRows,
         editorState,
         isPreferredApiMongoDB,
+        clientWriteEnabled,
         onNewDocumentClick,
         onSaveNewDocumentClick,
         onRevertNewDocumentClick,
         onSaveExistingDocumentClick,
-        onRevertExistingDocumentClick: onRevertExistingDocumentClick,
-        onDeleteExistingDocumentsClick: onDeleteExistingDocumentsClick,
+        onRevertExistingDocumentClick,
+        onDeleteExistingDocumentsClick,
+        onUploadDocumentsClick,
       }),
     [
-      _collection,
       selectedRows,
       editorState,
       isPreferredApiMongoDB,
+      clientWriteEnabled,
       onNewDocumentClick,
       onSaveNewDocumentClick,
       onRevertNewDocumentClick,
       onSaveExistingDocumentClick,
       onRevertExistingDocumentClick,
       onDeleteExistingDocumentsClick,
+      onUploadDocumentsClick,
       isTabActive,
     ],
   );
-
-  const onShowFilterClick = () => {
-    setIsFilterCreated(true);
-    setIsFilterExpanded(true);
-    setIsFilterFocused(true);
-  };
 
   const queryTimeoutEnabled = useCallback(
     (): boolean => !isPreferredApiMongoDB && LocalStorageUtility.getEntryBoolean(StorageKey.QueryTimeoutEnabled),
@@ -1030,7 +1372,13 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
     const _queryAbortController = new AbortController();
     setQueryAbortController(_queryAbortController);
     const filter: string = filterContent.trim();
-    const query: string = buildQuery(isPreferredApiMongoDB, filter, partitionKeyProperties, partitionKey);
+    const query: string = buildQuery(
+      isPreferredApiMongoDB,
+      filter,
+      partitionKeyProperties,
+      partitionKey,
+      selectedColumnIds,
+    );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const options: any = {};
     // TODO: Property 'enableCrossPartitionQuery' does not exist on type 'FeedOptions'.
@@ -1053,20 +1401,8 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
     resourceTokenPartitionKey,
     isQueryCopilotSampleContainer,
     _collection,
+    selectedColumnIds,
   ]);
-
-  const onHideFilterClick = (): void => {
-    setIsFilterExpanded(false);
-  };
-
-  const onCloseButtonKeyDown: KeyboardEventHandler<HTMLSpanElement> = (event) => {
-    if (event.keyCode === KeyCodes.Enter || event.keyCode === KeyCodes.Space) {
-      onHideFilterClick();
-      event.stopPropagation();
-      return false;
-    }
-    return true;
-  };
 
   const updateDocumentIds = (newDocumentsIds: DocumentId[]): void => {
     setDocumentIds(newDocumentsIds);
@@ -1198,16 +1534,6 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
     documentsIterator, // loadNextPage: disabled as it will trigger a circular dependency and infinite loop
   ]);
 
-  const onRefreshKeyInput: KeyboardEventHandler<HTMLButtonElement> = (event) => {
-    if (event.key === " " || event.key === "Enter") {
-      const focusElement = event.target as HTMLElement;
-      refreshDocumentsGrid(false);
-      focusElement && focusElement.focus();
-      event.stopPropagation();
-      event.preventDefault();
-    }
-  };
-
   const onLoadMoreKeyInput: KeyboardEventHandler<HTMLAnchorElement> = (event) => {
     if (event.key === " " || event.key === "Enter") {
       const focusElement = event.target as HTMLElement;
@@ -1219,13 +1545,8 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
   };
 
   const onFilterKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
-    if (e.key === "Enter") {
-      refreshDocumentsGrid(true);
-
-      // Suppress the default behavior of the key
-      e.preventDefault();
-    } else if (e.key === "Escape") {
-      onHideFilterClick();
+    if (e.key === Constants.NormalizedEventKey.Enter) {
+      onApplyFilterClick();
 
       // Suppress the default behavior of the key
       e.preventDefault();
@@ -1239,9 +1560,7 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
 
   // Table config here
   const tableItems: DocumentsTableComponentItem[] = documentIds.map((documentId) => {
-    const item: Record<string, string> & { id: string } = {
-      id: documentId.id(),
-    };
+    const item: DocumentsTableComponentItem = documentId.tableFields || { id: documentId.id() };
 
     if (partitionKeyPropertyHeaders && documentId.stringPartitionKeyValues) {
       for (let i = 0; i < partitionKeyPropertyHeaders.length; i++) {
@@ -1251,6 +1570,44 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
 
     return item;
   });
+
+  const extractColumnDefinitionsFromDocument = (document: unknown): ColumnDefinition[] => {
+    let columnDefinitions: ColumnDefinition[] = Object.keys(document)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .filter((key) => typeof (document as any)[key] === "string" || typeof (document as any)[key] === "number") // Only allow safe types for displayable React children
+      .map((key) =>
+        key === "id"
+          ? { id: key, label: isPreferredApiMongoDB ? "_id" : "id", isPartitionKey: false }
+          : { id: key, label: key, isPartitionKey: false },
+      );
+
+    if (showPartitionKey(_collection, isPreferredApiMongoDB)) {
+      columnDefinitions.push(
+        ...partitionKeyPropertyHeaders.map((key) => ({ id: key, label: key, isPartitionKey: true })),
+      );
+
+      // Remove properties that are the partition keys, since they are already included
+      columnDefinitions = columnDefinitions.filter(
+        (columnDefinition) => !partitionKeyProperties.includes(columnDefinition.id),
+      );
+    }
+
+    return columnDefinitions;
+  };
+
+  /**
+   * Extract column definitions from document and add to the definitions
+   * @param document
+   */
+  const setColumnDefinitionsFromDocument = (document: unknown): void => {
+    const currentIds = new Set(columnDefinitions.map((columnDefinition) => columnDefinition.id));
+    extractColumnDefinitionsFromDocument(document).forEach((columnDefinition) => {
+      if (!currentIds.has(columnDefinition.id)) {
+        columnDefinitions.push(columnDefinition);
+      }
+    });
+    setColumnDefinitions([...columnDefinitions]);
+  };
 
   /**
    * replicate logic of selectedDocument.click();
@@ -1267,6 +1624,9 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
     (_isQueryCopilotSampleContainer ? readSampleDocument(documentId) : readDocument(_collection, documentId)).then(
       (content) => {
         initDocumentEditor(documentId, content);
+
+        // Update columns
+        setColumnDefinitionsFromDocument(content);
       },
     );
 
@@ -1357,10 +1717,22 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
     return () => resizeObserver.disconnect(); // clean up
   }, []);
 
-  const columnHeaders = {
-    idHeader: isPreferredApiMongoDB ? "_id" : "id",
-    partitionKeyHeaders: (showPartitionKey(_collection, isPreferredApiMongoDB) && partitionKeyPropertyHeaders) || [],
-  };
+  // Column definition is a map<id, ColumnDefinition> to garantee uniqueness
+  const [columnDefinitions, setColumnDefinitions] = useState<ColumnDefinition[]>(() => {
+    const persistedColumnsSelection = readDocumentsTabSubComponentState<ColumnsSelection>(
+      SubComponentName.ColumnsSelection,
+      _collection,
+      undefined,
+    );
+
+    if (!persistedColumnsSelection) {
+      return extractColumnDefinitionsFromDocument({
+        id: "id",
+      });
+    }
+
+    return persistedColumnsSelection.columnDefinitions;
+  });
 
   const onSelectedRowsChange = (selectedRows: Set<TableRowId>) => {
     confirmDiscardingChange(() => {
@@ -1399,7 +1771,8 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
     renderObjectForEditor = (value: unknown): string => MongoUtility.tojson(value, null, false);
 
     const _hasShardKeySpecified = (document: unknown): boolean => {
-      return Boolean(extractPartitionKeyValues(document, _getPartitionKeyDefinition() as PartitionKeyDefinition));
+      const partitionKeyDefinition: PartitionKeyDefinition = _getPartitionKeyDefinition() as PartitionKeyDefinition;
+      return partitionKeyDefinition.systemKey || Boolean(extractPartitionKeyValues(document, partitionKeyDefinition));
     };
 
     const _getPartitionKeyDefinition = (): DataModels.PartitionKey => {
@@ -1423,8 +1796,7 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
       return partitionKey;
     };
 
-    lastFilterContents = ['{"id":"foo"}', "{ qty: { $gte: 20 } }"];
-    partitionKeyProperties = partitionKeyProperties?.map((partitionKeyProperty, i) => {
+    partitionKeyProperties = partitionKeyProperties.map((partitionKeyProperty, i) => {
       if (partitionKeyProperty && ~partitionKeyProperty.indexOf(`"`)) {
         partitionKeyProperty = partitionKeyProperty.replace(/["]+/g, "");
       }
@@ -1437,62 +1809,6 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
 
       return partitionKeyProperty;
     });
-
-    /**
-     * Mongo implementation
-     * TODO: update proxy to use mongo driver deleteMany
-     */
-    _deleteDocuments = (toDeleteDocumentIds: DocumentId[]): Promise<DocumentId[]> => {
-      const promises = toDeleteDocumentIds.map((documentId) => _deleteDocument(documentId));
-      return Promise.all(promises);
-    };
-
-    const __deleteDocument = async (documentId: DocumentId): Promise<DocumentId> => {
-      await MongoProxyClient.deleteDocument(_collection.databaseId, _collection as ViewModels.Collection, documentId);
-      return documentId;
-    };
-
-    const _deleteDocument = useCallback(
-      (documentId: DocumentId): Promise<DocumentId> => {
-        onExecutionErrorChange(false);
-        const startKey: number = TelemetryProcessor.traceStart(Action.DeleteDocument, {
-          dataExplorerArea: Constants.Areas.Tab,
-          tabTitle,
-        });
-        setIsExecuting(true);
-        return __deleteDocument(documentId)
-          .then(
-            (deletedDocumentId) => {
-              TelemetryProcessor.traceSuccess(
-                Action.DeleteDocument,
-                {
-                  dataExplorerArea: Constants.Areas.Tab,
-                  tabTitle,
-                },
-                startKey,
-              );
-              return deletedDocumentId;
-            },
-            (error) => {
-              onExecutionErrorChange(true);
-              console.error(error);
-              TelemetryProcessor.traceFailure(
-                Action.DeleteDocument,
-                {
-                  dataExplorerArea: Constants.Areas.Tab,
-                  tabTitle,
-                  error: getErrorMessage(error),
-                  errorStack: getErrorStack(error),
-                },
-                startKey,
-              );
-              return undefined;
-            },
-          )
-          .finally(() => setIsExecuting(false));
-      },
-      [__deleteDocument, onExecutionErrorChange, tabTitle],
-    );
 
     onSaveNewDocumentClick = useCallback((): Promise<unknown> => {
       const documentContent = JSON.parse(selectedDocumentContent);
@@ -1649,7 +1965,7 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
       setIsExecuting(true);
       onExecutionErrorChange(false);
       const filter: string = filterContent.trim();
-      const query: string = buildQuery(isPreferredApiMongoDB, filter);
+      const query: string = buildQuery(isPreferredApiMongoDB, filter, selectedColumnIds);
 
       return MongoProxyClient.queryDocuments(
         _collection.databaseId,
@@ -1700,6 +2016,24 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
   }
   // ***************** Mongo ***************************
 
+  const onApplyFilterClick = (): void => {
+    refreshDocumentsGrid(true);
+
+    // Remove duplicates, but keep order
+    if (lastFilterContents.includes(filterContent)) {
+      lastFilterContents.splice(lastFilterContents.indexOf(filterContent), 1);
+    }
+
+    // Save filter content to local storage
+    lastFilterContents.unshift(filterContent);
+
+    // Keep the list size under MAX_FILTER_HISTORY_COUNT. Drop last element if needed.
+    const limitedLastFilterContents = lastFilterContents.slice(0, MAX_FILTER_HISTORY_COUNT);
+
+    setLastFilterContents(limitedLastFilterContents);
+    saveDocumentsTabSubComponentState<FilterHistory>(SubComponentName.FilterHistory, _collection, lastFilterContents);
+  };
+
   const refreshDocumentsGrid = useCallback(
     (applyFilterButtonPressed: boolean): void => {
       // clear documents grid
@@ -1711,10 +2045,6 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
           iterator: createIterator(),
           applyFilterButtonPressed,
         });
-
-        // collapse filter
-        setAppliedFilter(filterContent);
-        setIsFilterExpanded(false);
 
         // If apply filter is pressed, reset current selected document
         if (applyFilterButtonPressed) {
@@ -1730,163 +2060,261 @@ export const DocumentsTabComponent: React.FunctionComponent<IDocumentsTabCompone
     [createIterator, filterContent],
   );
 
+  /**
+   * While retrying, display: retrying now.
+   * If completed and all documents were deleted, display: all documents deleted.
+   * @returns 429 warning message
+   */
+  const get429WarningMessageNoSql = (): string => {
+    let message = 'Some delete requests failed due to a "Request too large" exception (429)';
+
+    if (bulkDeleteOperation.count === bulkDeleteProcess.successfulIds.length) {
+      message += ", but were successfully retried.";
+    } else if (bulkDeleteMode === "inProgress" || bulkDeleteMode === "aborting") {
+      message += ". Retrying now.";
+    } else {
+      message += ".";
+    }
+
+    return (message +=
+      " To prevent this in the future, consider increasing the throughput on your container or database.");
+  };
+
+  const onColumnSelectionChange = (newSelectedColumnIds: string[]): void => {
+    // Do not allow to unselecting all columns
+    if (newSelectedColumnIds.length === 0) {
+      return;
+    }
+
+    setSelectedColumnIds(newSelectedColumnIds);
+
+    saveDocumentsTabSubComponentState<ColumnsSelection>(SubComponentName.ColumnsSelection, _collection, {
+      selectedColumnIds: newSelectedColumnIds,
+      columnDefinitions,
+    });
+  };
+
+  const prevSelectedColumnIds = usePrevious({ selectedColumnIds, setSelectedColumnIds });
+
+  useEffect(() => {
+    // If we are adding a field, let's refresh to include the field in the query
+    let addedField = false;
+    for (const field of selectedColumnIds) {
+      if (
+        !defaultQueryFields.includes(field) &&
+        prevSelectedColumnIds &&
+        !prevSelectedColumnIds.selectedColumnIds.includes(field)
+      ) {
+        addedField = true;
+        break;
+      }
+    }
+
+    if (addedField) {
+      refreshDocumentsGrid(false);
+    }
+  }, [prevSelectedColumnIds, refreshDocumentsGrid, selectedColumnIds]);
+
+  // TODO: remove partitionKey.systemKey when JS SDK bug is fixed
+  const isBulkDeleteDisabled = partitionKey.systemKey && !isPreferredApiMongoDB;
+  //  -------------------------------------------------------
+
+  const getFilterChoices = (): InputDatalistDropdownOptionSection[] => {
+    const options: InputDatalistDropdownOptionSection[] = [];
+    const nonBlankLastFilters = lastFilterContents.filter((filter) => filter.trim() !== "");
+    if (nonBlankLastFilters.length > 0) {
+      options.push({
+        label: "Saved filters",
+        options: nonBlankLastFilters,
+      });
+    }
+    options.push({
+      label: "Default filters",
+      options: isPreferredApiMongoDB ? defaultMongoFilters : getDefaultSqlFilters(partitionKeyProperties),
+    });
+    return options;
+  };
+
+  const updateFilterContent = (filter: string): void => {
+    if (filter === "" || filter === undefined) {
+      deleteDocumentsTabSubComponentState(SubComponentName.CurrentFilter, _collection);
+    } else {
+      saveDocumentsTabSubComponentState<string>(SubComponentName.CurrentFilter, _collection, filter, true);
+    }
+    setFilterContent(filter);
+  };
+
   return (
     <CosmosFluentProvider className={styles.container}>
-      <div className="tab-pane active" role="tabpanel" style={{ display: "flex" }}>
-        {isFilterCreated && (
-          <>
-            {!isFilterExpanded && !isPreferredApiMongoDB && (
-              <div className={styles.filterRow}>
-                <span>SELECT * FROM c</span>
-                <span className={styles.appliedFilter}>{appliedFilter}</span>
-                <Button appearance="primary" size="small" onClick={onShowFilterClick}>
-                  Edit Filter
-                </Button>
-              </div>
-            )}
-            {!isFilterExpanded && isPreferredApiMongoDB && (
-              <div className={styles.filterRow}>
-                {appliedFilter.length > 0 && <span>Filter :</span>}
-                {!(appliedFilter.length > 0) && <span className="noFilterApplied">No filter applied</span>}
-                <span className={styles.appliedFilter}>{appliedFilter}</span>
-                <Button appearance="primary" size="small" onClick={onShowFilterClick}>
-                  Edit Filter
-                </Button>
-              </div>
-            )}
-            {isFilterExpanded && (
-              <div className={styles.filterRow}>
-                {!isPreferredApiMongoDB && <span> SELECT * FROM c </span>}
-                <Input
-                  id="filterInput"
-                  ref={filterInput}
-                  type="text"
-                  size="small"
-                  list="filtersList"
-                  className={styles.filterInput}
-                  title="Type a query predicate or choose one from the list."
-                  placeholder={
-                    isPreferredApiMongoDB
-                      ? "Type a query predicate (e.g., {´a´:´foo´}), or choose one from the drop down list, or leave empty to query all documents."
-                      : "Type a query predicate (e.g., WHERE c.id=´1´), or choose one from the drop down list, or leave empty to query all documents."
+      <div data-test={"DocumentsTab"} className="tab-pane active" role="tabpanel" style={{ display: "flex" }}>
+        <div data-test={"DocumentsTab/Filter"} className={`${styles.filterRow} ${styles.smallScreenContent}`}>
+          {!isPreferredApiMongoDB && <span> SELECT * FROM c </span>}
+          <InputDataList
+            dropdownOptions={getFilterChoices()}
+            placeholder={
+              isPreferredApiMongoDB
+                ? "Type a query predicate (e.g., {´a´:´foo´}), or choose one from the drop down list, or leave empty to query all documents."
+                : "Type a query predicate (e.g., WHERE c.id=´1´), or choose one from the drop down list, or leave empty to query all documents."
+            }
+            title="Type a query predicate or choose one from the list."
+            value={filterContent}
+            onChange={updateFilterContent}
+            onKeyDown={onFilterKeyDown}
+            bottomLink={{ text: "Learn more", url: DATA_EXPLORER_DOC_URL }}
+          />
+          <Button
+            appearance="primary"
+            data-test={"DocumentsTab/ApplyFilter"}
+            size="small"
+            onClick={() => {
+              if (isExecuting) {
+                if (!isPreferredApiMongoDB) {
+                  queryAbortController.abort();
+                }
+              } else {
+                onApplyFilterClick();
+              }
+            }}
+            disabled={isExecuting && isPreferredApiMongoDB}
+            aria-label={!isExecuting || isPreferredApiMongoDB ? "Apply filter" : "Cancel"}
+            tabIndex={0}
+          >
+            {!isExecuting || isPreferredApiMongoDB ? "Apply Filter" : "Cancel"}
+          </Button>
+        </div>
+        <Allotment
+          onDragEnd={(sizes: number[]) => {
+            tabStateData.leftPaneWidthPercent = (100 * sizes[0]) / (sizes[0] + sizes[1]);
+            saveDocumentsTabSubComponentState<TabDivider>(SubComponentName.MainTabDivider, _collection, tabStateData);
+            setTabStateData(tabStateData);
+          }}
+        >
+          <Allotment.Pane preferredSize={`${tabStateData.leftPaneWidthPercent}%`} minSize={55}>
+            <div
+              data-test={"DocumentsTab/DocumentsPane"}
+              style={{ height: "100%", width: "100%", overflow: "hidden" }}
+              ref={tableContainerRef}
+            >
+              <div className={styles.tableContainer}>
+                <div
+                  style={
+                    {
+                      height: "100%",
+                      width: `calc(100% + ${calculateOffset(selectedColumnIds.length)}px)`,
+                    } /* Fix to make table not resize beyond parent's width */
                   }
-                  value={filterContent}
-                  autoFocus={true}
-                  onKeyDown={onFilterKeyDown}
-                  onChange={(e) => setFilterContent(e.target.value)}
-                  onBlur={() => setIsFilterFocused(false)}
-                />
-
-                <datalist id="filtersList">
-                  {lastFilterContents.map((filter) => (
-                    <option key={filter} value={filter} />
-                  ))}
-                </datalist>
-
-                <Button
-                  appearance="primary"
-                  size="small"
-                  onClick={() => refreshDocumentsGrid(true)}
-                  disabled={!applyFilterButton.enabled}
-                  aria-label="Apply filter"
-                  tabIndex={0}
                 >
-                  Apply Filter
-                </Button>
-                {!isPreferredApiMongoDB && isExecuting && (
-                  <Button
-                    appearance="primary"
-                    size="small"
-                    aria-label="Cancel Query"
-                    onClick={() => queryAbortController.abort()}
-                    tabIndex={0}
-                  >
-                    Cancel Query
-                  </Button>
-                )}
-                <Button
-                  aria-label="close filter"
-                  tabIndex={0}
-                  onClick={onHideFilterClick}
-                  onKeyDown={onCloseButtonKeyDown}
-                  appearance="transparent"
-                  size="small"
-                  icon={<Dismiss16Filled />}
-                />
-              </div>
-            )}
-          </>
-        )}
-
-        {/* <Split> doesn't like to be a flex child */}
-        <div style={{ overflow: "hidden", height: "100%" }}>
-          <Allotment>
-            <Allotment.Pane preferredSize="35%" minSize={175}>
-              <div style={{ height: "100%", width: "100%", overflow: "hidden" }} ref={tableContainerRef}>
-                <div className={styles.floatingControlsContainer}>
-                  <div className={styles.floatingControls}>
-                    <Button
-                      appearance="transparent"
-                      aria-label="Refresh"
-                      size="small"
-                      icon={<ArrowClockwise16Filled />}
-                      style={{
-                        color: StyleConstants.AccentMedium,
-                      }}
-                      onClick={() => refreshDocumentsGrid(false)}
-                      onKeyDown={onRefreshKeyInput}
-                    />
-                  </div>
-                </div>
-                <div className={styles.tableContainer}>
                   <DocumentsTableComponent
+                    onRefreshTable={() => refreshDocumentsGrid(false)}
                     items={tableItems}
-                    onItemClicked={(index) => onDocumentClicked(index, documentIds)}
                     onSelectedRowsChange={onSelectedRowsChange}
                     selectedRows={selectedRows}
                     size={tableContainerSizePx}
-                    columnHeaders={columnHeaders}
-                    isSelectionDisabled={
-                      (partitionKey.systemKey && !isPreferredApiMongoDB) ||
-                      (configContext.platform === Platform.Fabric && userContext.fabricContext?.isReadOnly)
+                    selectedColumnIds={selectedColumnIds}
+                    columnDefinitions={columnDefinitions}
+                    isRowSelectionDisabled={
+                      isBulkDeleteDisabled || (isFabric() && userContext.fabricContext?.isReadOnly)
                     }
+                    onColumnSelectionChange={onColumnSelectionChange}
+                    defaultColumnSelection={getInitialColumnSelection()}
+                    collection={_collection}
+                    isColumnSelectionDisabled={isPreferredApiMongoDB}
                   />
                 </div>
-                {tableItems.length > 0 && (
-                  <a
-                    className={styles.loadMore}
+                {tableContainerSizePx?.width >= calculateOffset(selectedColumnIds.length) + 200 && (
+                  <div
+                    title="Refresh"
+                    className={styles.refreshBtn}
                     role="button"
+                    onClick={() => refreshDocumentsGrid(false)}
+                    aria-label="Refresh"
                     tabIndex={0}
-                    onClick={() => loadNextPage(documentsIterator.iterator, false)}
-                    onKeyDown={onLoadMoreKeyInput}
                   >
-                    Load more
-                  </a>
+                    <img src={RefreshIcon} alt="Refresh" />
+                  </div>
                 )}
               </div>
-            </Allotment.Pane>
-            <Allotment.Pane preferredSize="65%" minSize={300}>
-              <div style={{ height: "100%", width: "100%" }}>
-                {isTabActive && selectedDocumentContent && selectedRows.size <= 1 && (
-                  <EditorReact
-                    language={"json"}
-                    content={selectedDocumentContent}
-                    isReadOnly={false}
-                    ariaLabel={"Document editor"}
-                    lineNumbers={"on"}
-                    theme={"_theme"}
-                    onContentChanged={_onEditorContentChange}
-                    enableWordWrapContextMenuItem={true}
-                  />
-                )}
-                {selectedRows.size > 1 && (
-                  <span style={{ margin: 10 }}>Number of selected documents: {selectedRows.size}</span>
-                )}
-              </div>
-            </Allotment.Pane>
-          </Allotment>
-        </div>
+              {tableItems.length > 0 && (
+                <a
+                  className={styles.loadMore}
+                  data-test={"DocumentsTab/LoadMore"}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => loadNextPage(documentsIterator.iterator, false)}
+                  onKeyDown={onLoadMoreKeyInput}
+                >
+                  Load more
+                </a>
+              )}
+            </div>
+          </Allotment.Pane>
+          <Allotment.Pane minSize={30}>
+            <div data-test={"DocumentsTab/ResultsPane"} style={{ height: "100%", width: "100%" }}>
+              {isTabActive && selectedDocumentContent && selectedRows.size <= 1 && (
+                <EditorReact
+                  language={"json"}
+                  content={selectedDocumentContent}
+                  isReadOnly={false}
+                  ariaLabel={"Document editor"}
+                  lineNumbers={"on"}
+                  theme={"_theme"}
+                  onContentChanged={_onEditorContentChange}
+                  enableWordWrapContextMenuItem={true}
+                />
+              )}
+              {selectedRows.size > 1 && (
+                <span style={{ margin: 10 }}>Number of selected documents: {selectedRows.size}</span>
+              )}
+            </div>
+          </Allotment.Pane>
+        </Allotment>
       </div>
+      {bulkDeleteOperation && (
+        <ProgressModalDialog
+          isOpen={isBulkDeleteDialogOpen}
+          dismissText="Abort"
+          onDismiss={() => {
+            setIsBulkDeleteDialogOpen(false);
+            setBulkDeleteOperation(undefined);
+          }}
+          onCancel={() => setBulkDeleteMode("aborting")}
+          title={`Deleting ${bulkDeleteOperation.count} document(s)`}
+          message={`Successfully deleted ${bulkDeleteProcess.successfulIds.length} document(s).`}
+          maxValue={bulkDeleteOperation.count}
+          value={bulkDeleteProcess.successfulIds.length}
+          mode={bulkDeleteMode}
+        >
+          <div className={styles.deleteProgressContent}>
+            {(bulkDeleteMode === "aborting" || bulkDeleteMode === "aborted") && (
+              <div style={{ paddingBottom: tokens.spacingVerticalL }}>Deleting document(s) was aborted.</div>
+            )}
+            {(bulkDeleteProcess.failedIds.length > 0 ||
+              (bulkDeleteProcess.throttledIds.length > 0 && bulkDeleteMode !== "inProgress")) && (
+              <MessageBar intent="error" style={{ marginBottom: tokens.spacingVerticalL }}>
+                <MessageBarBody>
+                  <MessageBarTitle>Error</MessageBarTitle>
+                  Failed to delete{" "}
+                  {bulkDeleteMode === "inProgress"
+                    ? bulkDeleteProcess.failedIds.length
+                    : bulkDeleteProcess.failedIds.length + bulkDeleteProcess.throttledIds.length}{" "}
+                  document(s).
+                </MessageBarBody>
+              </MessageBar>
+            )}
+            {bulkDeleteProcess.hasBeenThrottled && (
+              <MessageBar intent="warning">
+                <MessageBarBody>
+                  <MessageBarTitle>Warning</MessageBarTitle>
+                  {get429WarningMessageNoSql()}{" "}
+                  <Link href={NO_SQL_THROTTLING_DOC_URL} target="_blank">
+                    Learn More
+                  </Link>
+                </MessageBarBody>
+              </MessageBar>
+            )}
+          </div>
+        </ProgressModalDialog>
+      )}
     </CosmosFluentProvider>
   );
 };

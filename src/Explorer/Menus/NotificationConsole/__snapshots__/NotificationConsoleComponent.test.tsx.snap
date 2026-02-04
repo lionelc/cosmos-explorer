@@ -5,10 +5,13 @@ exports[`NotificationConsoleComponent renders the console 1`] = `
   className="notificationConsoleContainer"
 >
   <div
+    aria-expanded={false}
+    aria-label="Console"
     className="notificationConsoleHeader"
     id="notificationConsoleHeader"
     onClick={[Function]}
     onKeyDown={[Function]}
+    role="button"
     tabIndex={0}
   >
     <div
@@ -21,7 +24,7 @@ exports[`NotificationConsoleComponent renders the console 1`] = `
           className="notificationConsoleHeaderIconWithData"
         >
           <img
-            alt="in progress items"
+            alt="In progress items"
             src={{}}
           />
           <span
@@ -34,7 +37,7 @@ exports[`NotificationConsoleComponent renders the console 1`] = `
           className="notificationConsoleHeaderIconWithData"
         >
           <img
-            alt="error items"
+            alt="Error items"
             src={{}}
           />
           <span
@@ -47,11 +50,24 @@ exports[`NotificationConsoleComponent renders the console 1`] = `
           className="notificationConsoleHeaderIconWithData"
         >
           <img
-            alt="info items"
+            alt="Info items"
             src={{}}
           />
           <span
             className="numInfoItems"
+          >
+            0
+          </span>
+        </span>
+        <span
+          className="notificationConsoleHeaderIconWithData"
+        >
+          <img
+            alt="Warning items"
+            src={{}}
+          />
+          <span
+            className="numWarningItems"
           >
             0
           </span>
@@ -71,14 +87,11 @@ exports[`NotificationConsoleComponent renders the console 1`] = `
       </span>
     </div>
     <div
-      aria-expanded={true}
-      aria-label="console button collapsed"
       className="expandCollapseButton"
-      role="button"
-      tabIndex={0}
+      data-test="NotificationConsole/ExpandCollapseButton"
     >
       <img
-        alt="ChevronUpIcon"
+        alt="Expand icon"
         src=""
       />
     </div>
@@ -109,6 +122,7 @@ exports[`NotificationConsoleComponent renders the console 1`] = `
   >
     <div
       className="notificationConsoleContents"
+      data-test="NotificationConsole/Contents"
     >
       <div
         className="notificationConsoleControls"
@@ -174,10 +188,13 @@ exports[`NotificationConsoleComponent renders the console 2`] = `
   className="notificationConsoleContainer"
 >
   <div
+    aria-expanded={false}
+    aria-label="Console"
     className="notificationConsoleHeader"
     id="notificationConsoleHeader"
     onClick={[Function]}
     onKeyDown={[Function]}
+    role="button"
     tabIndex={0}
   >
     <div
@@ -190,7 +207,7 @@ exports[`NotificationConsoleComponent renders the console 2`] = `
           className="notificationConsoleHeaderIconWithData"
         >
           <img
-            alt="in progress items"
+            alt="In progress items"
             src={{}}
           />
           <span
@@ -203,7 +220,7 @@ exports[`NotificationConsoleComponent renders the console 2`] = `
           className="notificationConsoleHeaderIconWithData"
         >
           <img
-            alt="error items"
+            alt="Error items"
             src={{}}
           />
           <span
@@ -216,13 +233,26 @@ exports[`NotificationConsoleComponent renders the console 2`] = `
           className="notificationConsoleHeaderIconWithData"
         >
           <img
-            alt="info items"
+            alt="Info items"
             src={{}}
           />
           <span
             className="numInfoItems"
           >
             1
+          </span>
+        </span>
+        <span
+          className="notificationConsoleHeaderIconWithData"
+        >
+          <img
+            alt="Warning items"
+            src={{}}
+          />
+          <span
+            className="numWarningItems"
+          >
+            0
           </span>
         </span>
       </span>
@@ -242,14 +272,11 @@ exports[`NotificationConsoleComponent renders the console 2`] = `
       </span>
     </div>
     <div
-      aria-expanded={true}
-      aria-label="console button collapsed"
       className="expandCollapseButton"
-      role="button"
-      tabIndex={0}
+      data-test="NotificationConsole/ExpandCollapseButton"
     >
       <img
-        alt="ChevronUpIcon"
+        alt="Expand icon"
         src=""
       />
     </div>
@@ -280,6 +307,7 @@ exports[`NotificationConsoleComponent renders the console 2`] = `
   >
     <div
       className="notificationConsoleContents"
+      data-test="NotificationConsole/Contents"
     >
       <div
         className="notificationConsoleControls"

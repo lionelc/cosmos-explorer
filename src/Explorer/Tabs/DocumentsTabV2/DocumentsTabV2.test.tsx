@@ -1,7 +1,11 @@
 import { FeedResponse, ItemDefinition, Resource } from "@azure/cosmos";
+import { waitFor } from "@testing-library/react";
 import { deleteDocuments } from "Common/dataAccess/deleteDocument";
 import { Platform, updateConfigContext } from "ConfigContext";
+import { CosmosDbArtifactType } from "Contracts/FabricMessagesContract";
+import { useDialog } from "Explorer/Controls/Dialog";
 import { EditorReactProps } from "Explorer/Controls/Editor/EditorReact";
+import { ProgressModalDialog } from "Explorer/Controls/ProgressModalDialog";
 import { useCommandBar } from "Explorer/Menus/CommandBar/CommandBarComponentAdapter";
 import {
   ButtonsDependencies,
@@ -13,6 +17,7 @@ import {
   SAVE_BUTTON_ID,
   UPDATE_BUTTON_ID,
   UPLOAD_BUTTON_ID,
+  addStringsNoDuplicate,
   buildQuery,
   getDiscardExistingDocumentChangesButtonState,
   getDiscardNewDocumentChangesButtonState,
@@ -45,6 +50,7 @@ jest.mock("Common/dataAccess/queryDocuments", () => ({
         requestCharge: 1,
         activityId: "activityId",
         indexMetrics: "indexMetrics",
+        correlatedActivityId: undefined,
       }),
   })),
 }));
@@ -64,12 +70,14 @@ jest.mock("Explorer/Controls/Editor/EditorReact", () => ({
   EditorReact: (props: EditorReactProps) => <>{props.content}</>,
 }));
 
+const mockDialogState = {
+  showOkCancelModalDialog: jest.fn((title: string, subText: string, okLabel: string, onOk: () => void) => onOk()),
+  showOkModalDialog: () => {},
+};
+
 jest.mock("Explorer/Controls/Dialog", () => ({
   useDialog: {
-    getState: jest.fn(() => ({
-      showOkCancelModalDialog: (title: string, subText: string, okLabel: string, onOk: () => void) => onOk(),
-      showOkModalDialog: () => {},
-    })),
+    getState: jest.fn(() => mockDialogState),
   },
 }));
 
@@ -77,6 +85,10 @@ jest.mock("Common/dataAccess/deleteDocument", () => ({
   deleteDocuments: jest.fn((collection: ViewModels.CollectionBase, documentIds: DocumentId[]) =>
     Promise.resolve(documentIds),
   ),
+}));
+
+jest.mock("Explorer/Controls/ProgressModalDialog", () => ({
+  ProgressModalDialog: jest.fn(() => <></>),
 }));
 
 async function waitForComponentToPaint<P = unknown>(wrapper: ReactWrapper<P> | ShallowWrapper<P>, amount = 0) {
@@ -91,7 +103,13 @@ async function waitForComponentToPaint<P = unknown>(wrapper: ReactWrapper<P> | S
 describe("Documents tab (noSql API)", () => {
   describe("buildQuery", () => {
     it("should generate the right select query for SQL API", () => {
-      expect(buildQuery(false, "")).toContain("select");
+      expect(
+        buildQuery(false, "", ["pk"], {
+          paths: ["pk"],
+          kind: "Hash",
+          version: 2,
+        }),
+      ).toContain("select");
     });
   });
 
@@ -324,10 +342,15 @@ describe("Documents tab (noSql API)", () => {
     updateConfigContext({ platform: Platform.Fabric });
     updateUserContext({
       fabricContext: {
-        connectionId: "test",
-        databaseConnectionInfo: undefined,
+        databaseName: "database",
+        artifactInfo: {
+          connectionId: "test",
+          resourceTokenInfo: undefined,
+        },
+        artifactType: CosmosDbArtifactType.MIRRORED_KEY,
         isReadOnly: true,
         isVisible: true,
+        fabricClientRpcVersion: "rpcVersion",
       },
     });
 
@@ -339,7 +362,10 @@ describe("Documents tab (noSql API)", () => {
     const createMockProps = (): IDocumentsTabComponentProps => ({
       isPreferredApiMongoDB: false,
       documentIds: [],
-      collection: undefined,
+      collection: {
+        id: ko.observable<string>("collectionId"),
+        databaseId: "databaseId",
+      } as ViewModels.CollectionBase,
       partitionKey: { kind: "Hash", paths: ["/foo"], version: 2 },
       onLoadStartKey: 0,
       tabTitle: "",
@@ -365,22 +391,6 @@ describe("Documents tab (noSql API)", () => {
 
     it("should render the page", () => {
       expect(wrapper).toMatchSnapshot();
-    });
-
-    it("clicking on Edit filter should render the Apply Filter button", () => {
-      wrapper
-        .findWhere((node) => node.text() === "Edit Filter")
-        .at(0)
-        .simulate("click");
-      expect(wrapper.findWhere((node) => node.text() === "Apply Filter").exists()).toBeTruthy();
-    });
-
-    it("clicking on Edit filter should render input for filter", () => {
-      wrapper
-        .findWhere((node) => node.text() === "Edit Filter")
-        .at(0)
-        .simulate("click");
-      expect(wrapper.find("#filterInput").exists()).toBeTruthy();
     });
   });
 
@@ -459,7 +469,29 @@ describe("Documents tab (noSql API)", () => {
       expect(useCommandBar.getState().contextButtons.find((button) => button.id === DISCARD_BUTTON_ID)).toBeDefined();
     });
 
-    it("clicking Delete Document asks for confirmation", () => {
+    it("clicking Delete Document asks for confirmation", async () => {
+      act(async () => {
+        await useCommandBar
+          .getState()
+          .contextButtons.find((button) => button.id === DELETE_BUTTON_ID)
+          .onCommandClick(undefined);
+      });
+
+      expect(useDialog.getState().showOkCancelModalDialog).toHaveBeenCalled();
+    });
+
+    it("clicking Delete Document for NoSql shows progress dialog", () => {
+      act(() => {
+        useCommandBar
+          .getState()
+          .contextButtons.find((button) => button.id === DELETE_BUTTON_ID)
+          .onCommandClick(undefined);
+      });
+
+      expect(ProgressModalDialog).toHaveBeenCalled();
+    });
+
+    it("clicking Delete Document eventually calls delete client api", () => {
       const mockDeleteDocuments = deleteDocuments as jest.Mock;
       mockDeleteDocuments.mockClear();
 
@@ -470,7 +502,18 @@ describe("Documents tab (noSql API)", () => {
           .onCommandClick(undefined);
       });
 
-      expect(mockDeleteDocuments).toHaveBeenCalled();
+      // The implementation uses setTimeout, so wait for it to finish
+      waitFor(() => expect(mockDeleteDocuments).toHaveBeenCalled());
     });
+  });
+});
+
+describe("Documents tab", () => {
+  it("should add strings to array without duplicate", () => {
+    const array1 = ["a", "b", "c"];
+    const array2 = ["b", "c", "d"];
+
+    const array3 = addStringsNoDuplicate(array1, array2);
+    expect(array3).toEqual(["a", "b", "c", "d"]);
   });
 });

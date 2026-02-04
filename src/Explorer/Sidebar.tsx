@@ -1,31 +1,41 @@
 import {
   Button,
+  makeStyles,
   Menu,
+  MenuButton,
   MenuButtonProps,
   MenuItem,
   MenuList,
   MenuPopover,
   MenuTrigger,
-  SplitButton,
-  makeStyles,
   mergeClasses,
   shorthands,
+  SplitButton,
 } from "@fluentui/react-components";
 import { Add16Regular, ArrowSync12Regular, ChevronLeft12Regular, ChevronRight12Regular } from "@fluentui/react-icons";
-import { Platform, configContext } from "ConfigContext";
+import { GlobalSecondaryIndexLabels } from "Common/Constants";
+import { isGlobalSecondaryIndexEnabled } from "Common/DatabaseAccountUtility";
+import { configContext, Platform } from "ConfigContext";
 import Explorer from "Explorer/Explorer";
 import { AddDatabasePanel } from "Explorer/Panes/AddDatabasePanel/AddDatabasePanel";
+import {
+  AddGlobalSecondaryIndexPanel,
+  AddGlobalSecondaryIndexPanelProps,
+} from "Explorer/Panes/AddGlobalSecondaryIndexPanel/AddGlobalSecondaryIndexPanel";
 import { Tabs } from "Explorer/Tabs/Tabs";
 import { CosmosFluentProvider, cosmosShorthands, tokens } from "Explorer/Theme/ThemeUtil";
 import { ResourceTree } from "Explorer/Tree/ResourceTree";
 import { useDatabases } from "Explorer/useDatabases";
 import { KeyboardAction, KeyboardActionGroup, KeyboardActionHandler, useKeyboardActionGroup } from "KeyboardShortcuts";
+import { isFabric, isFabricMirrored, isFabricNative, isFabricNativeReadOnly } from "Platform/Fabric/FabricUtil";
 import { userContext } from "UserContext";
 import { getCollectionName, getDatabaseName } from "Utils/APITypeUtils";
+import { conditionalClass } from "Utils/StyleUtils";
 import { Allotment, AllotmentHandle } from "allotment";
 import { useSidePanel } from "hooks/useSidePanel";
+import useZoomLevel from "hooks/useZoomLevel";
 import { debounce } from "lodash";
-import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 const useSidebarStyles = makeStyles({
   sidebar: {
@@ -60,6 +70,7 @@ const useSidebarStyles = makeStyles({
     alignItems: "center",
     justifyItems: "center",
     width: "100%",
+    containerType: "size", // Use this container for "@container" queries below this.
     ...cosmosShorthands.borderBottom(),
   },
   loadingProgressBar: {
@@ -83,6 +94,35 @@ const useSidebarStyles = makeStyles({
       },
     },
   },
+  globalCommandsMenuButton: {
+    display: "inline-flex",
+    "@container (min-width: 250px)": {
+      display: "none",
+    },
+  },
+  globalCommandsSplitButton: {
+    display: "none",
+    "@container (min-width: 250px)": {
+      display: "flex",
+    },
+  },
+  accessibleContent: {
+    "@media (max-width: 420px)": {
+      overflow: "scroll",
+    },
+  },
+  minHeightResponsive: {
+    "@media (max-width: 420px)": {
+      minHeight: "400px",
+    },
+  },
+  accessibleContentZoom: {
+    overflow: "scroll",
+  },
+
+  minHeightZoom: {
+    minHeight: "400px",
+  },
 });
 
 interface GlobalCommandsProps {
@@ -95,13 +135,21 @@ interface GlobalCommand {
   icon: JSX.Element;
   onClick: () => void;
   keyboardAction?: KeyboardAction;
+  ref?: React.RefObject<HTMLButtonElement>;
 }
 
 const GlobalCommands: React.FC<GlobalCommandsProps> = ({ explorer }) => {
   const styles = useSidebarStyles();
+
+  // Since we have two buttons in the DOM (one for small screens and one for larger screens), we wrap the entire thing in a div.
+  // However, that messes with the Menu positioning, so we need to get a reference to the 'div' to pass to the Menu.
+  // We can't use a ref though, because it would be set after the Menu is rendered, so we use a state value to force a re-render.
+  const [globalCommandButton, setGlobalCommandButton] = useState<HTMLElement | null>(null);
+  const primaryFocusableRef = useRef<HTMLButtonElement>(null);
+
   const actions = useMemo<GlobalCommand[]>(() => {
     if (
-      configContext.platform === Platform.Fabric ||
+      (isFabric() && userContext.fabricContext?.isReadOnly) ||
       userContext.apiType === "Postgres" ||
       userContext.apiType === "VCoreMongo"
     ) {
@@ -115,12 +163,15 @@ const GlobalCommands: React.FC<GlobalCommandsProps> = ({ explorer }) => {
         id: "new_collection",
         label: `New ${getCollectionName()}`,
         icon: <Add16Regular />,
-        onClick: () => explorer.onNewCollectionClicked(),
+        onClick: () => {
+          const databaseId = isFabricNative() ? userContext.fabricContext?.databaseName : undefined;
+          explorer.onNewCollectionClicked({ databaseId });
+        },
         keyboardAction: KeyboardAction.NEW_COLLECTION,
       },
     ];
 
-    if (userContext.apiType !== "Tables") {
+    if (configContext.platform !== Platform.Fabric && userContext.apiType !== "Tables") {
       actions.push({
         id: "new_database",
         label: `New ${getDatabaseName()}`,
@@ -133,6 +184,25 @@ const GlobalCommands: React.FC<GlobalCommandsProps> = ({ explorer }) => {
           useSidePanel.getState().openSidePanel("New " + getDatabaseName(), <AddDatabasePanel explorer={explorer} />);
         },
         keyboardAction: KeyboardAction.NEW_DATABASE,
+      });
+    }
+
+    if (isGlobalSecondaryIndexEnabled()) {
+      const addMaterializedViewPanelProps: AddGlobalSecondaryIndexPanelProps = {
+        explorer,
+      };
+
+      actions.push({
+        id: "new_materialized_view",
+        label: GlobalSecondaryIndexLabels.NewGlobalSecondaryIndex,
+        icon: <Add16Regular />,
+        onClick: () =>
+          useSidePanel
+            .getState()
+            .openSidePanel(
+              GlobalSecondaryIndexLabels.NewGlobalSecondaryIndex,
+              <AddGlobalSecondaryIndexPanel {...addMaterializedViewPanelProps} />,
+            ),
       });
     }
 
@@ -157,6 +227,16 @@ const GlobalCommands: React.FC<GlobalCommandsProps> = ({ explorer }) => {
     );
   }, [actions, setKeyboardActions]);
 
+  useLayoutEffect(() => {
+    if (primaryFocusableRef.current) {
+      const timer = setTimeout(() => {
+        primaryFocusableRef.current.focus();
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, []);
+
   if (!primaryAction) {
     return null;
   }
@@ -164,20 +244,26 @@ const GlobalCommands: React.FC<GlobalCommandsProps> = ({ explorer }) => {
   return (
     <div className={styles.globalCommandsContainer} data-test="GlobalCommands">
       {actions.length === 1 ? (
-        <Button icon={primaryAction.icon} onClick={onPrimaryActionClick}>
+        <Button icon={primaryAction.icon} onClick={onPrimaryActionClick} ref={primaryFocusableRef}>
           {primaryAction.label}
         </Button>
       ) : (
-        <Menu positioning="below-end">
+        <Menu positioning={{ target: globalCommandButton, position: "below", align: "end" }}>
           <MenuTrigger disableButtonEnhancement>
             {(triggerProps: MenuButtonProps) => (
-              <SplitButton
-                menuButton={{ ...triggerProps, "aria-label": "More commands" }}
-                primaryActionButton={{ onClick: onPrimaryActionClick }}
-                icon={primaryAction.icon}
-              >
-                {primaryAction.label}
-              </SplitButton>
+              <div ref={setGlobalCommandButton}>
+                <SplitButton
+                  menuButton={{ ...triggerProps, "aria-label": "More commands" }}
+                  primaryActionButton={{ onClick: onPrimaryActionClick, ref: primaryFocusableRef }}
+                  className={styles.globalCommandsSplitButton}
+                  icon={primaryAction.icon}
+                >
+                  {primaryAction.label}
+                </SplitButton>
+                <MenuButton {...triggerProps} icon={primaryAction.icon} className={styles.globalCommandsMenuButton}>
+                  New...
+                </MenuButton>
+              </div>
             )}
           </MenuTrigger>
           <MenuPopover>
@@ -199,7 +285,7 @@ interface SidebarProps {
   explorer: Explorer;
 }
 
-const CollapseThreshold = 50;
+const CollapseThreshold = 140;
 
 export const SidebarContainer: React.FC<SidebarProps> = ({ explorer }) => {
   const styles = useSidebarStyles();
@@ -208,6 +294,7 @@ export const SidebarContainer: React.FC<SidebarProps> = ({ explorer }) => {
   const [expandedSize, setExpandedSize] = React.useState(300);
   const hasSidebar = userContext.apiType !== "Postgres" && userContext.apiType !== "VCoreMongo";
   const allotment = useRef<AllotmentHandle>(null);
+  const isZoomed = useZoomLevel();
 
   const expand = useCallback(() => {
     if (!expanded) {
@@ -249,64 +336,94 @@ export const SidebarContainer: React.FC<SidebarProps> = ({ explorer }) => {
     setLoading(false);
   }, [setLoading]);
 
+  const hasGlobalCommands = !(
+    isFabricMirrored() ||
+    isFabricNativeReadOnly() ||
+    userContext.apiType === "Postgres" ||
+    userContext.apiType === "VCoreMongo"
+  );
+
   return (
-    <Allotment ref={allotment} onChange={onChange} onDragEnd={onDragEnd} className="resourceTreeAndTabs">
-      {/* Collections Tree - Start */}
-      {hasSidebar && (
-        // When collapsed, we force the pane to 24 pixels wide and make it non-resizable.
-        <Allotment.Pane minSize={24} preferredSize={300}>
-          <CosmosFluentProvider className={mergeClasses(styles.sidebar)}>
-            <div className={styles.sidebarContainer}>
-              {loading && (
-                // The Fluent UI progress bar has some issues in reduced-motion environments so we use a simple CSS animation here.
-                // https://github.com/microsoft/fluentui/issues/29076
-                <div className={styles.loadingProgressBar} title="Refreshing tree..." />
-              )}
-              {expanded ? (
-                <>
-                  <div className={styles.floatingControlsContainer}>
-                    <div className={styles.floatingControls}>
-                      <button
-                        type="button"
-                        className={styles.floatingControlButton}
-                        disabled={loading}
-                        title="Refresh"
-                        onClick={onRefreshClick}
-                      >
-                        <ArrowSync12Regular />
-                      </button>
-                      <button
-                        type="button"
-                        className={styles.floatingControlButton}
-                        title="Collapse sidebar"
-                        onClick={() => collapse()}
-                      >
-                        <ChevronLeft12Regular />
-                      </button>
+    <div className="sidebarContainer">
+      <Allotment
+        ref={allotment}
+        onChange={onChange}
+        onDragEnd={onDragEnd}
+        className={`resourceTreeAndTabs ${styles.accessibleContent} ${conditionalClass(
+          isZoomed,
+          styles.accessibleContentZoom,
+        )}`}
+      >
+        {/* Collections Tree - Start */}
+        {hasSidebar && (
+          // When collapsed, we force the pane to 24 pixels wide and make it non-resizable.
+          <Allotment.Pane
+            className={`${styles.minHeightResponsive} ${conditionalClass(isZoomed, styles.minHeightZoom)}`}
+            minSize={24}
+            preferredSize={250}
+          >
+            <CosmosFluentProvider className={mergeClasses(styles.sidebar)}>
+              <div className={styles.sidebarContainer}>
+                {loading && (
+                  // The Fluent UI progress bar has some issues in reduced-motion environments so we use a simple CSS animation here.
+                  // https://github.com/microsoft/fluentui/issues/29076
+                  <div className={styles.loadingProgressBar} title="Refreshing tree..." />
+                )}
+                {expanded ? (
+                  <>
+                    <div className={styles.floatingControlsContainer}>
+                      <div className={styles.floatingControls}>
+                        {!isFabricNative() && (
+                          <button
+                            type="button"
+                            data-test="Sidebar/RefreshButton"
+                            className={styles.floatingControlButton}
+                            disabled={loading}
+                            title="Refresh"
+                            onClick={onRefreshClick}
+                          >
+                            <ArrowSync12Regular />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className={styles.floatingControlButton}
+                          title="Collapse sidebar"
+                          onClick={() => collapse()}
+                        >
+                          <ChevronLeft12Regular />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                  <div className={styles.expandedContent}>
-                    <GlobalCommands explorer={explorer} />
-                    <ResourceTree explorer={explorer} />
-                  </div>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  className={styles.floatingControlButton}
-                  title="Expand sidebar"
-                  onClick={() => expand()}
-                >
-                  <ChevronRight12Regular />
-                </button>
-              )}
-            </div>
-          </CosmosFluentProvider>
+                    <div
+                      className={styles.expandedContent}
+                      style={!hasGlobalCommands ? { gridTemplateRows: "1fr" } : undefined}
+                    >
+                      {hasGlobalCommands && <GlobalCommands explorer={explorer} />}
+                      <ResourceTree explorer={explorer} />
+                    </div>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className={styles.floatingControlButton}
+                    title="Expand sidebar"
+                    onClick={() => expand()}
+                  >
+                    <ChevronRight12Regular />
+                  </button>
+                )}
+              </div>
+            </CosmosFluentProvider>
+          </Allotment.Pane>
+        )}
+        <Allotment.Pane
+          className={`${styles.minHeightResponsive} ${conditionalClass(isZoomed, styles.minHeightZoom)}`}
+          minSize={200}
+        >
+          <Tabs explorer={explorer} />
         </Allotment.Pane>
-      )}
-      <Allotment.Pane minSize={800}>
-        <Tabs explorer={explorer} />
-      </Allotment.Pane>
-    </Allotment>
+      </Allotment>
+    </div>
   );
 };

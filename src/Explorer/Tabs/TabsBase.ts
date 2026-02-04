@@ -1,8 +1,8 @@
+import { OpenTab } from "Contracts/ActionContracts";
 import { KeyboardActionGroup, clearKeyboardActionGroup } from "KeyboardShortcuts";
 import * as ko from "knockout";
 import * as Constants from "../../Common/Constants";
 import * as ThemeUtility from "../../Common/ThemeUtility";
-import * as DataModels from "../../Contracts/DataModels";
 import * as ViewModels from "../../Contracts/ViewModels";
 import { Action, ActionModifiers } from "../../Shared/Telemetry/TelemetryConstants";
 import * as TelemetryProcessor from "../../Shared/Telemetry/TelemetryProcessor";
@@ -27,10 +27,12 @@ export default class TabsBase extends WaitsForTemplateViewModel {
   public tabTitle: ko.Observable<string>;
   public tabPath: ko.Observable<string>;
   public isExecutionError = ko.observable(false);
+  public isExecutionWarning = ko.observable(false);
   public isExecuting = ko.observable(false);
-  public pendingNotification?: ko.Observable<DataModels.Notification>;
   protected _theme: string;
   public onLoadStartKey: number;
+
+  protected persistedState: OpenTab | undefined = undefined; // Used to store state of tab for persistence
 
   constructor(options: ViewModels.TabOptions) {
     super();
@@ -45,7 +47,6 @@ export default class TabsBase extends WaitsForTemplateViewModel {
     this.tabPath =
       this.collection &&
       ko.observable<string>(`${this.collection.databaseId}>${this.collection.id()}>${options.title}`);
-    this.pendingNotification = ko.observable<DataModels.Notification>(undefined);
     this.onLoadStartKey = options.onLoadStartKey;
     this.closeTabButton = {
       enabled: ko.computed<boolean>(() => {
@@ -57,6 +58,10 @@ export default class TabsBase extends WaitsForTemplateViewModel {
       }),
     };
   }
+
+  // Called by useTabs to persist
+  public getPersistedState = (): OpenTab | null => this.persistedState;
+  public triggerPersistState: () => void = undefined;
 
   public onCloseTabButtonClick(): void {
     useTabs.getState().closeTab(this);

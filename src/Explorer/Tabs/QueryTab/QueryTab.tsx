@@ -1,4 +1,5 @@
 import { sendMessage } from "Common/MessageHandler";
+import { ActionType, OpenQueryTab, TabKind } from "Contracts/ActionContracts";
 import { MessageTypes } from "Contracts/MessageTypes";
 import { CopilotProvider } from "Explorer/QueryCopilot/QueryCopilotContext";
 import { userContext } from "UserContext";
@@ -7,10 +8,11 @@ import * as DataModels from "../../../Contracts/DataModels";
 import type { QueryTabOptions } from "../../../Contracts/ViewModels";
 import { useTabs } from "../../../hooks/useTabs";
 import Explorer from "../../Explorer";
-import QueryTabComponent, {
+import {
   IQueryTabComponentProps,
   ITabAccessor,
-  QueryTabFunctionComponent,
+  QueryTabComponent,
+  QueryTabCopilotComponent,
 } from "../../Tabs/QueryTab/QueryTabComponent";
 import TabsBase from "../TabsBase";
 
@@ -25,6 +27,8 @@ export class NewQueryTab extends TabsBase {
   public iQueryTabComponentProps: IQueryTabComponentProps;
   public iTabAccessor: ITabAccessor;
 
+  protected persistedState: OpenQueryTab;
+
   constructor(
     options: QueryTabOptions,
     private props: IQueryTabProps,
@@ -38,18 +42,47 @@ export class NewQueryTab extends TabsBase {
       tabsBaseInstance: this,
       queryText: options.queryText,
       partitionKey: this.partitionKey,
+      splitterDirection: options.splitterDirection,
+      queryViewSizePercent: options.queryViewSizePercent,
       container: this.props.container,
       onTabAccessor: (instance: ITabAccessor): void => {
         this.iTabAccessor = instance;
       },
       isPreferredApiMongoDB: false,
+      onUpdatePersistedState: (state: {
+        queryText: string;
+        splitterDirection: string;
+        queryViewSizePercent: number;
+      }): void => {
+        this.persistedState = {
+          actionType: ActionType.OpenCollectionTab,
+          tabKind: TabKind.SQLQuery,
+          databaseResourceId: options.collection.databaseId,
+          collectionResourceId: options.collection.id(),
+          query: {
+            text: state.queryText,
+          },
+          splitterDirection: state.splitterDirection as "vertical" | "horizontal",
+          queryViewSizePercent: state.queryViewSizePercent,
+        };
+        if (this.triggerPersistState) {
+          this.triggerPersistState();
+        }
+      },
     };
+
+    // set initial state
+    this.iQueryTabComponentProps.onUpdatePersistedState({
+      queryText: options.queryText,
+      splitterDirection: options.splitterDirection,
+      queryViewSizePercent: options.queryViewSizePercent,
+    });
   }
 
   public render(): JSX.Element {
     return userContext.apiType === "SQL" ? (
       <CopilotProvider>
-        <QueryTabFunctionComponent {...this.iQueryTabComponentProps} />
+        <QueryTabCopilotComponent {...this.iQueryTabComponentProps} />
       </CopilotProvider>
     ) : (
       <QueryTabComponent {...this.iQueryTabComponentProps} />

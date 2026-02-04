@@ -1,16 +1,18 @@
 // Data Explorer specific actions. No need to keep this in sync with the one in Portal.
+// Some of the enums names are used in Fabric. Please do not rename them.
 export enum Action {
   CollapseTreeNode,
-  CreateCollection,
-  CreateDocument,
+  CreateCollection, // Used in Fabric. Please do not rename.
+  CreateGlobalSecondaryIndex,
+  CreateDocument, // Used in Fabric. Please do not rename.
   CreateStoredProcedure,
   CreateTrigger,
   CreateUDF,
-  DeleteCollection,
+  DeleteCollection, // Used in Fabric. Please do not rename.
   DeleteDatabase,
   DeleteDocument,
   ExpandTreeNode,
-  ExecuteQuery,
+  ExecuteQuery, // Used in Fabric. Please do not rename.
   HasFeature,
   GetVNETServices,
   InitializeAccountLocationFromResourceGroup,
@@ -87,6 +89,7 @@ export enum Action {
   PhoenixDBAccountAllowed,
   DeleteCellFromMenu,
   OpenTerminal,
+  OpenCloudShellTerminal,
   CreateMongoCollectionWithWildcardIndex,
   ClickCommandBarButton,
   RefreshResourceTreeMyNotebooks,
@@ -119,6 +122,7 @@ export enum Action {
   NotebooksGalleryPublishedCount,
   SelfServe,
   ExpandAddCollectionPaneAdvancedSection,
+  ExpandAddGlobalSecondaryIndexPaneAdvancedSection,
   SchemaAnalyzerClickAnalyze,
   SelfServeComponent,
   LaunchQuickstart,
@@ -139,6 +143,13 @@ export enum Action {
   QueryEdited,
   ExecuteQueryGeneratedFromQueryCopilot,
   DeleteDocuments,
+  ReadPersistedTabState,
+  SavePersistedTabState,
+  DeletePersistedTabState,
+  UploadDocuments, // Used in Fabric. Please do not rename.
+  CloudShellUserConsent,
+  CloudShellTerminalSession,
+  OpenVSCode,
 }
 
 export const ActionModifiers = {

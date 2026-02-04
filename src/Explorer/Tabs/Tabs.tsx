@@ -1,30 +1,24 @@
-import { IMessageBarStyles, Link, MessageBar, MessageBarButton, MessageBarType } from "@fluentui/react";
-import { CassandraProxyEndpoints, MongoProxyEndpoints } from "Common/Constants";
-import { sendMessage } from "Common/MessageHandler";
-import { Platform, configContext, updateConfigContext } from "ConfigContext";
-import { IpRule } from "Contracts/DataModels";
-import { MessageTypes } from "Contracts/ExplorerContracts";
 import { CollectionTabKind } from "Contracts/ViewModels";
 import Explorer from "Explorer/Explorer";
 import { useCommandBar } from "Explorer/Menus/CommandBar/CommandBarComponentAdapter";
 import { QueryCopilotTab } from "Explorer/QueryCopilot/QueryCopilotTab";
+import { FabricHomeScreen } from "Explorer/SplashScreen/FabricHome";
 import { SplashScreen } from "Explorer/SplashScreen/SplashScreen";
 import { ConnectTab } from "Explorer/Tabs/ConnectTab";
 import { PostgresConnectTab } from "Explorer/Tabs/PostgresConnectTab";
 import { QuickstartTab } from "Explorer/Tabs/QuickstartTab";
 import { VcoreMongoConnectTab } from "Explorer/Tabs/VCoreMongoConnectTab";
 import { VcoreMongoQuickstartTab } from "Explorer/Tabs/VCoreMongoQuickstartTab";
-import { LayoutConstants } from "Explorer/Theme/ThemeUtil";
 import { KeyboardAction, KeyboardActionGroup, useKeyboardActionGroup } from "KeyboardShortcuts";
-import { hasRUThresholdBeenConfigured } from "Shared/StorageUtility";
+import { isFabricNative } from "Platform/Fabric/FabricUtil";
 import { userContext } from "UserContext";
-import { CassandraProxyOutboundIPs, MongoProxyOutboundIPs, PortalBackendIPs } from "Utils/EndpointUtils";
 import { useTeachingBubble } from "hooks/useTeachingBubble";
 import ko from "knockout";
 import React, { MutableRefObject, useEffect, useRef, useState } from "react";
 import loadingIcon from "../../../images/circular_loader_black_16x16.gif";
 import errorIcon from "../../../images/close-black.svg";
 import errorQuery from "../../../images/error_no_outline.svg";
+import warningIconSvg from "../../../images/warning.svg";
 import { useObservable } from "../../hooks/useObservable";
 import { ReactTabKind, useTabs } from "../../hooks/useTabs";
 import TabsBase from "./TabsBase";
@@ -36,14 +30,7 @@ interface TabsProps {
 }
 
 export const Tabs = ({ explorer }: TabsProps): JSX.Element => {
-  const { openedTabs, openedReactTabs, activeTab, activeReactTab, networkSettingsWarning } = useTabs();
-  const [showRUThresholdMessageBar, setShowRUThresholdMessageBar] = useState<boolean>(
-    userContext.apiType === "SQL" && configContext.platform !== Platform.Fabric && !hasRUThresholdBeenConfigured(),
-  );
-  const [
-    showMongoAndCassandraProxiesNetworkSettingsWarningState,
-    setShowMongoAndCassandraProxiesNetworkSettingsWarningState,
-  ] = useState<boolean>(showMongoAndCassandraProxiesNetworkSettingsWarning());
+  const { openedTabs, openedReactTabs, activeTab, activeReactTab } = useTabs();
 
   const setKeyboardHandlers = useKeyboardActionGroup(KeyboardActionGroup.TABS);
   useEffect(() => {
@@ -54,74 +41,8 @@ export const Tabs = ({ explorer }: TabsProps): JSX.Element => {
     });
   }, [setKeyboardHandlers]);
 
-  const defaultMessageBarStyles: IMessageBarStyles = {
-    root: {
-      height: `${LayoutConstants.rowHeight}px`,
-      overflow: "auto",
-    },
-  };
-
   return (
     <div className="tabsManagerContainer">
-      {networkSettingsWarning && (
-        <MessageBar
-          messageBarType={MessageBarType.warning}
-          styles={defaultMessageBarStyles}
-          actions={
-            <MessageBarButton
-              onClick={() =>
-                sendMessage({
-                  type:
-                    userContext.apiType === "VCoreMongo"
-                      ? MessageTypes.OpenVCoreMongoNetworkingBlade
-                      : MessageTypes.OpenPostgresNetworkingBlade,
-                })
-              }
-            >
-              Change network settings
-            </MessageBarButton>
-          }
-          messageBarIconProps={{ iconName: "WarningSolid", className: "messageBarWarningIcon" }}
-        >
-          {networkSettingsWarning}
-        </MessageBar>
-      )}
-      {showRUThresholdMessageBar && (
-        <MessageBar
-          messageBarType={MessageBarType.info}
-          onDismiss={() => {
-            setShowRUThresholdMessageBar(false);
-          }}
-          styles={{
-            ...defaultMessageBarStyles,
-            innerText: {
-              fontWeight: "bold",
-            },
-          }}
-        >
-          {`To prevent queries from using excessive RUs, Data Explorer has a 5,000 RU default limit. To modify or remove
-          the limit, go to the Settings cog on the right and find "RU Threshold".`}
-          <Link
-            className="underlinedLink"
-            href="https://review.learn.microsoft.com/en-us/azure/cosmos-db/data-explorer?branch=main#configure-request-unit-threshold"
-            target="_blank"
-          >
-            Learn More
-          </Link>
-        </MessageBar>
-      )}
-      {showMongoAndCassandraProxiesNetworkSettingsWarningState && (
-        <MessageBar
-          messageBarType={MessageBarType.warning}
-          styles={defaultMessageBarStyles}
-          onDismiss={() => {
-            setShowMongoAndCassandraProxiesNetworkSettingsWarningState(false);
-          }}
-        >
-          {`We are moving our middleware to new infrastructure. To avoid future issues with Data Explorer access, please
-          re-enable "Allow access from Azure Portal" on the Networking blade for your account.`}
-        </MessageBar>
-      )}
       <div className="nav-tabs-margin">
         <ul className="nav nav-tabs level navTabHeight" id="navTabs" role="tablist">
           {openedReactTabs.map((tab) => (
@@ -197,6 +118,9 @@ function TabNav({ tab, active, tabKind }: { tab?: Tab; active: boolean; tabKind?
           >
             <span className="statusIconContainer" style={{ width: tabKind === ReactTabKind.Home ? 0 : 18 }}>
               {useObservable(tab?.isExecutionError || ko.observable(false)) && <ErrorIcon tab={tab} active={active} />}
+              {useObservable(tab?.isExecutionWarning || ko.observable(false)) && (
+                <WarningIcon tab={tab} active={active} />
+              )}
               {isTabExecuting(tab, tabKind) && (
                 <img className="loadingIcon" title="Loading" src={loadingIcon} alt="Loading" />
               )}
@@ -255,7 +179,7 @@ const CloseButton = ({
     onKeyPress={({ nativeEvent: e }) => (tab ? tab.onKeyPressClose(undefined, e) : onKeyPressReactTabClose(e, tabKind))}
   >
     <span className="tabIcon close-Icon">
-      <img src={errorIcon} title="Close" alt="Close" role="none" />
+      <img src={errorIcon} title="Close" alt="Close" aria-label="hidden" />
     </span>
   </span>
 );
@@ -271,6 +195,20 @@ const ErrorIcon = ({ tab, active }: { tab: Tab; active: boolean }) => (
     onKeyPress={({ nativeEvent: e }) => tab.onErrorDetailsKeyPress(undefined, e)}
   >
     <span className="errorIcon" />
+  </div>
+);
+
+const WarningIcon = ({ tab, active }: { tab: Tab; active: boolean }) => (
+  <div
+    id="warningStatusIcon"
+    role="button"
+    title="Click to view more details"
+    tabIndex={active ? 0 : undefined}
+    className={active ? "actionsEnabled warningIconContainer" : "warningIconContainer"}
+    onClick={({ nativeEvent: e }) => tab.onErrorDetailsClick(undefined, e)}
+    onKeyPress={({ nativeEvent: e }) => tab.onErrorDetailsKeyPress(undefined, e)}
+  >
+    <img src={warningIconSvg} alt="Warning Icon" style={{ height: 15, marginBottom: 5 }} />
   </div>
 );
 
@@ -298,11 +236,15 @@ function TabPane({ tab, active }: { tab: Tab; active: boolean }) {
 
   if (tab) {
     if ("render" in tab) {
-      return <div {...attrs}>{tab.render()}</div>;
+      return (
+        <div data-test={`Tab:${tab.tabId}`} {...attrs}>
+          {tab.render()}
+        </div>
+      );
     }
   }
 
-  return <div {...attrs} ref={ref} data-bind="html:html" />;
+  return <div data-test={`Tab:${tab.tabId}`} {...attrs} ref={ref} data-bind="html:html" />;
 }
 
 const onKeyPressReactTab = (e: KeyboardEvent, tabKind: ReactTabKind): void => {
@@ -349,7 +291,11 @@ const getReactTabContent = (activeReactTab: ReactTabKind, explorer: Explorer): J
         <ConnectTab />
       );
     case ReactTabKind.Home:
-      return <SplashScreen explorer={explorer} />;
+      if (isFabricNative()) {
+        return <FabricHomeScreen explorer={explorer} />;
+      } else {
+        return <SplashScreen explorer={explorer} />;
+      }
     case ReactTabKind.Quickstart:
       return userContext.apiType === "VCoreMongo" ? (
         <VcoreMongoQuickstartTab explorer={explorer} />
@@ -361,70 +307,4 @@ const getReactTabContent = (activeReactTab: ReactTabKind, explorer: Explorer): J
     default:
       throw Error(`Unsupported tab kind ${ReactTabKind[activeReactTab]}`);
   }
-};
-
-const showMongoAndCassandraProxiesNetworkSettingsWarning = (): boolean => {
-  const ipRules: IpRule[] = userContext.databaseAccount?.properties?.ipRules;
-  if (
-    ((userContext.apiType === "Mongo" && configContext.MONGO_PROXY_ENDPOINT !== MongoProxyEndpoints.Local) ||
-      (userContext.apiType === "Cassandra" &&
-        configContext.CASSANDRA_PROXY_ENDPOINT !== CassandraProxyEndpoints.Development)) &&
-    ipRules?.length
-  ) {
-    const legacyPortalBackendIPs: string[] = PortalBackendIPs[configContext.BACKEND_ENDPOINT];
-    const ipAddressesFromIPRules: string[] = ipRules.map((ipRule) => ipRule.ipAddressOrRange);
-    const ipRulesIncludeLegacyPortalBackend: boolean = legacyPortalBackendIPs.every((legacyPortalBackendIP: string) =>
-      ipAddressesFromIPRules.includes(legacyPortalBackendIP),
-    );
-    if (!ipRulesIncludeLegacyPortalBackend) {
-      return false;
-    }
-
-    if (userContext.apiType === "Mongo") {
-      const isProdOrMpacMongoProxyEndpoint: boolean = [MongoProxyEndpoints.Mpac, MongoProxyEndpoints.Prod].includes(
-        configContext.MONGO_PROXY_ENDPOINT,
-      );
-
-      const mongoProxyOutboundIPs: string[] = isProdOrMpacMongoProxyEndpoint
-        ? [...MongoProxyOutboundIPs[MongoProxyEndpoints.Mpac], ...MongoProxyOutboundIPs[MongoProxyEndpoints.Prod]]
-        : MongoProxyOutboundIPs[configContext.MONGO_PROXY_ENDPOINT];
-
-      const ipRulesIncludeMongoProxy: boolean = mongoProxyOutboundIPs.every((mongoProxyOutboundIP: string) =>
-        ipAddressesFromIPRules.includes(mongoProxyOutboundIP),
-      );
-
-      if (ipRulesIncludeMongoProxy) {
-        updateConfigContext({
-          MONGO_PROXY_OUTBOUND_IPS_ALLOWLISTED: true,
-        });
-      }
-
-      return !ipRulesIncludeMongoProxy;
-    } else if (userContext.apiType === "Cassandra") {
-      const isProdOrMpacCassandraProxyEndpoint: boolean = [
-        CassandraProxyEndpoints.Mpac,
-        CassandraProxyEndpoints.Prod,
-      ].includes(configContext.CASSANDRA_PROXY_ENDPOINT);
-
-      const cassandraProxyOutboundIPs: string[] = isProdOrMpacCassandraProxyEndpoint
-        ? [
-            ...CassandraProxyOutboundIPs[CassandraProxyEndpoints.Mpac],
-            ...CassandraProxyOutboundIPs[CassandraProxyEndpoints.Prod],
-          ]
-        : CassandraProxyOutboundIPs[configContext.CASSANDRA_PROXY_ENDPOINT];
-
-      const ipRulesIncludeCassandraProxy: boolean = cassandraProxyOutboundIPs.every(
-        (cassandraProxyOutboundIP: string) => ipAddressesFromIPRules.includes(cassandraProxyOutboundIP),
-      );
-
-      if (ipRulesIncludeCassandraProxy) {
-        updateConfigContext({
-          CASSANDRA_PROXY_OUTBOUND_IPS_ALLOWLISTED: true,
-        });
-      }
-
-      return !ipRulesIncludeCassandraProxy;
-    }
-  }
-  return false;
 };

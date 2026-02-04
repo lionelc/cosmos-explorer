@@ -1,3 +1,4 @@
+import { AuthType } from "AuthType";
 import { shallow } from "enzyme";
 import ko from "knockout";
 import React from "react";
@@ -134,7 +135,6 @@ describe("SettingsComponent", () => {
       readSettings: undefined,
       onSettingsClick: undefined,
       loadOffer: undefined,
-      getPendingThroughputSplitNotification: undefined,
     } as ViewModels.Database;
     newCollection.getDatabase = () => newDatabase;
     newCollection.offer = ko.observable(undefined);
@@ -247,5 +247,43 @@ describe("SettingsComponent", () => {
     conflictResolutionPolicy = settingsComponentInstance.getUpdatedConflictResolutionPolicy();
     expect(conflictResolutionPolicy.mode).toEqual(DataModels.ConflictResolutionMode.Custom);
     expect(conflictResolutionPolicy.conflictResolutionProcedure).toEqual(expectSprocPath);
+  });
+
+  it("should save throughput bucket changes when Save button is clicked", async () => {
+    updateUserContext({
+      apiType: "SQL",
+      throughputBucketsEnabled: true,
+      authType: AuthType.AAD,
+    });
+
+    const wrapper = shallow(<SettingsComponent {...baseProps} />);
+
+    const settingsComponentInstance = wrapper.instance() as SettingsComponent;
+    const isEnabled = settingsComponentInstance["throughputBucketsEnabled"];
+    expect(isEnabled).toBe(true);
+
+    wrapper.setState({
+      isThroughputBucketsSaveable: true,
+      throughputBuckets: [
+        { id: 1, maxThroughputPercentage: 70 },
+        { id: 2, maxThroughputPercentage: 60 },
+      ],
+    });
+
+    await settingsComponentInstance.onSaveClick();
+
+    expect(updateOffer).toHaveBeenCalledWith({
+      databaseId: collection.databaseId,
+      collectionId: collection.id(),
+      currentOffer: expect.any(Object),
+      autopilotThroughput: collection.offer().autoscaleMaxThroughput,
+      manualThroughput: collection.offer().manualThroughput,
+      throughputBuckets: [
+        { id: 1, maxThroughputPercentage: 70 },
+        { id: 2, maxThroughputPercentage: 60 },
+      ],
+    });
+
+    expect(wrapper.state("isThroughputBucketsSaveable")).toBe(false);
   });
 });

@@ -1,10 +1,19 @@
 import * as Constants from "../../../Common/Constants";
 import * as DataModels from "../../../Contracts/DataModels";
 import * as ViewModels from "../../../Contracts/ViewModels";
+import { isFabricNative } from "../../../Platform/Fabric/FabricUtil";
 import { MongoIndex } from "../../../Utils/arm/generatedClients/cosmos/types";
 
 const zeroValue = 0;
-export type isDirtyTypes = boolean | string | number | DataModels.IndexingPolicy | DataModels.ComputedProperties;
+export type isDirtyTypes =
+  | boolean
+  | string
+  | number
+  | DataModels.IndexingPolicy
+  | DataModels.ComputedProperties
+  | DataModels.VectorEmbedding[]
+  | DataModels.FullTextPolicy
+  | DataModels.ThroughputBucket[];
 export const TtlOff = "off";
 export const TtlOn = "on";
 export const TtlOnNoDefault = "on-nodefault";
@@ -48,6 +57,13 @@ export enum SettingsV2TabTypes {
   PartitionKeyTab,
   ComputedPropertiesTab,
   ContainerVectorPolicyTab,
+  ThroughputBucketsTab,
+  GlobalSecondaryIndexTab,
+}
+
+export enum ContainerPolicyTabTypes {
+  VectorPolicyTab,
+  FullTextPolicyTab,
 }
 
 export interface IsComponentDirtyResult {
@@ -150,11 +166,15 @@ export const getTabTitle = (tab: SettingsV2TabTypes): string => {
     case SettingsV2TabTypes.IndexingPolicyTab:
       return "Indexing Policy";
     case SettingsV2TabTypes.PartitionKeyTab:
-      return "Partition Keys (preview)";
+      return isFabricNative() ? "Partition Keys" : "Partition Keys (preview)";
     case SettingsV2TabTypes.ComputedPropertiesTab:
       return "Computed Properties";
     case SettingsV2TabTypes.ContainerVectorPolicyTab:
-      return "Container Vector Policy (preview)";
+      return "Container Policies";
+    case SettingsV2TabTypes.ThroughputBucketsTab:
+      return "Throughput Buckets";
+    case SettingsV2TabTypes.GlobalSecondaryIndexTab:
+      return "Global Secondary Index (Preview)";
     default:
       throw new Error(`Unknown tab ${tab}`);
   }
